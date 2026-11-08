@@ -1,15 +1,15 @@
 import os
 import json
-import re
+import logging
 import threading
 import requests
 import telebot
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# =================================
-# HOSHIVAR AI CONFIGURATION
-# =================================
+# ==========================================
+# HOSHIVAR AI - CONFIGURATION
+# ==========================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -22,6 +22,24 @@ GEMINI_MODEL = os.getenv(
     "gemini-2.5-flash"
 )
 
+WEBHOOK_PATH = "/telegram-webhook"
+
+# ==========================================
+# LOGGING
+# ==========================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+logger = logging.getLogger("HOSHIWAR")
+
+# ==========================================
+# CONFIGURATION VALIDATION
+# ==========================================
+
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
 
@@ -31,15 +49,15 @@ if not GEMINI_API_KEY:
 if not WEBHOOK_SECRET:
     raise ValueError("WEBHOOK_SECRET is missing")
 
-if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
-    raise ValueError("Invalid WEBHOOK_SECRET")
-
 if not RENDER_URL:
     raise ValueError("RENDER_EXTERNAL_URL is missing")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+if not all(
+    c.isalnum() or c in "_-"
+    for c in WEBHOOK_SECRET
+) or not (1 <= len(WEBHOOK_SECRET) <= 256):
+    raise ValueError("Invalid WEBHOOK_SECRET")
 
-WEBHOOK_PATH = "/telegram-webhook"
 WEBHOOK_URL = RENDER_URL.rstrip("/") + WEBHOOK_PATH
 
 GEMINI_URL = (
@@ -47,24 +65,36 @@ GEMINI_URL = (
     f"models/{GEMINI_MODEL}:generateContent"
 )
 
+# ==========================================
+# TELEGRAM BOT
+# ==========================================
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# ==========================================
+# AI PERSONALITY
+# ==========================================
+
 SYSTEM_PROMPT = """
 تو هشیوار هستی؛ یک دستیار هوش مصنوعی فارسی‌زبان
 باهوش، دقیق، مودب، صمیمی و حرفه‌ای.
 
 قوانین تو:
+
 - به زبان کاربر پاسخ بده.
 - فارسی را روان و طبیعی بنویس.
-- پاسخ دقیق و کاربردی بده.
-- در صورت نیاز توضیح مرحله‌به‌مرحله ارائه کن.
-- در برنامه‌نویسی، کد صحیح و قابل اجرا ارائه بده.
-- اگر پاسخ چیزی را نمی‌دانی، صادقانه بگو.
-- از ایموجی به‌اندازه استفاده کن.
+- پاسخ دقیق و کاربردی ارائه بده.
+- در صورت نیاز توضیحات مرحله‌به‌مرحله بده.
+- در برنامه‌نویسی کد صحیح و قابل اجرا ارائه کن.
+- اگر چیزی را نمی‌دانی، صادقانه بگو.
+- از ایموجی به اندازه استفاده کن.
 - خودت را هشیوار معرفی کن.
+- با کاربران محترمانه و دوستانه صحبت کن.
 """
 
-# =================================
+# ==========================================
 # CHAT MEMORY
-# =================================
+# ==========================================
 
 chat_memory = {}
 memory_lock = threading.Lock()
@@ -73,13 +103,11 @@ MAX_HISTORY = 12
 
 
 def get_history(key):
-
     with memory_lock:
         return list(chat_memory.get(key, []))
 
 
 def save_history(key, user_message, ai_answer):
-
     with memory_lock:
 
         history = chat_memory.get(key, [])
@@ -98,30 +126,28 @@ def save_history(key, user_message, ai_answer):
 
 
 def clear_history(key):
-
     with memory_lock:
         chat_memory.pop(key, None)
 
 
-# =================================
-# GEMINI ERROR
-# =================================
+# ==========================================
+# GEMINI API ERROR
+# ==========================================
 
 class GeminiAPIError(Exception):
 
     def __init__(self, status, detail):
-
         self.status = status
         self.detail = detail
 
         super().__init__(
-            f"Gemini API Error {status}: {detail}"
+            f"Gemini HTTP {status}: {detail}"
         )
 
 
-# =================================
+# ==========================================
 # GEMINI AI ENGINE
-# =================================
+# ==========================================
 
 def ask_ai(message, memory_key):
 
@@ -137,7 +163,7 @@ def ask_ai(message, memory_key):
         "x-goog-api-key": GEMINI_API_KEY
     }
 
-    data = {
+    payload = {
         "systemInstruction": {
             "parts": [{"text": SYSTEM_PROMPT}]
         },
@@ -148,33 +174,47 @@ def ask_ai(message, memory_key):
         }
     }
 
+    logger.info("Sending request to Gemini...")
+    logger.info("Gemini model: %s", GEMINI_MODEL)
+
     try:
 
         response = requests.post(
             GEMINI_URL,
             headers=headers,
-            json=data,
+            json=payload,
             timeout=(15, 90)
         )
 
-    except requests.exceptions.RequestException as error:
+    except requests.exceptions.RequestException:
 
-        print("GEMINI NETWORK ERROR:", repr(error))
+        logger.exception("GEMINI NETWORK ERROR")
         raise
+
+    logger.info(
+        "Gemini HTTP STATUS: %s",
+        response.status_code
+    )
 
     if not response.ok:
 
         try:
             error_data = response.json()
+
             detail = error_data.get(
                 "error", {}
-            ).get("message", response.text[:2000])
+            ).get(
+                "message",
+                response.text[:2000]
+            )
 
         except ValueError:
             detail = response.text[:2000]
 
-        print("GEMINI HTTP STATUS:", response.status_code)
-        print("GEMINI ERROR DETAIL:", detail)
+        logger.error(
+            "GEMINI ERROR DETAIL: %s",
+            detail
+        )
 
         raise GeminiAPIError(
             response.status_code,
@@ -185,15 +225,15 @@ def ask_ai(message, memory_key):
         result = response.json()
 
     except ValueError:
-
-        raise ValueError("Gemini returned invalid JSON")
+        logger.error("Gemini returned invalid JSON")
+        raise ValueError("Invalid Gemini JSON")
 
     candidates = result.get("candidates", [])
 
     if not candidates:
 
-        print(
-            "GEMINI EMPTY CANDIDATES:",
+        logger.error(
+            "GEMINI EMPTY CANDIDATES: %s",
             json.dumps(result, ensure_ascii=False)[:3000]
         )
 
@@ -201,12 +241,9 @@ def ask_ai(message, memory_key):
             "promptFeedback", {}
         ).get("blockReason")
 
-        if block_reason:
-            raise ValueError(
-                f"Gemini blocked prompt: {block_reason}"
-            )
-
-        raise ValueError("Gemini returned no candidates")
+        raise ValueError(
+            f"Gemini returned no candidates: {block_reason}"
+        )
 
     candidate = candidates[0]
 
@@ -221,12 +258,14 @@ def ask_ai(message, memory_key):
 
     if not answer:
 
-        print(
-            "GEMINI EMPTY TEXT:",
+        logger.error(
+            "GEMINI EMPTY RESPONSE: %s",
             json.dumps(result, ensure_ascii=False)[:3000]
         )
 
-        raise ValueError("Gemini returned empty text")
+        raise ValueError(
+            "Gemini returned empty text"
+        )
 
     save_history(
         memory_key,
@@ -234,12 +273,14 @@ def ask_ai(message, memory_key):
         answer
     )
 
+    logger.info("Gemini response received successfully")
+
     return answer
 
 
-# =================================
+# ==========================================
 # TELEGRAM COMMANDS
-# =================================
+# ==========================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -247,12 +288,11 @@ def start(message):
     bot.reply_to(
         message,
         "سلام! 👋\n\n"
-        "به هشیوار خوش اومدی. 💙\n"
-        "دستیار هوش مصنوعی تو آماده‌ست.\n\n"
-        "هر سؤالی داری بپرس؛\n"
-        "با هم بهترین جواب رو پیدا می‌کنیم. ✨\n\n"
-        "برای پاک کردن حافظه گفتگو:\n"
-        "/reset"
+        "به هشیوار خوش اومدی. 💙\n\n"
+        "من دستیار هوش مصنوعی تو هستم.\n"
+        "هر سؤالی داری بپرس؛ با هم بهترین جواب رو پیدا می‌کنیم. ✨\n\n"
+        "برای راهنما: /help\n"
+        "برای پاک کردن حافظه: /reset"
     )
 
 
@@ -263,7 +303,7 @@ def help_command(message):
         message,
         "🤖 راهنمای هشیوار\n\n"
         "💬 هر سؤالی داری بفرست.\n"
-        "🧠 هشیوار پیام‌های اخیر گفتگو را به خاطر می‌سپارد.\n"
+        "🧠 حافظه مکالمات فعال است.\n"
         "🔄 برای پاک کردن حافظه از /reset استفاده کن."
     )
 
@@ -285,9 +325,9 @@ def reset_command(message):
     )
 
 
-# =================================
+# ==========================================
 # TELEGRAM AI CHAT
-# =================================
+# ==========================================
 
 @bot.message_handler(
     content_types=["text"],
@@ -321,6 +361,10 @@ def chat(message):
 
     except GeminiAPIError as error:
 
+        logger.exception(
+            "CHAT GEMINI ERROR"
+        )
+
         status = error.status
 
         if status in (400, 401, 403, 404):
@@ -333,8 +377,8 @@ def chat(message):
         elif status == 429:
 
             text = (
-                "⏳ سهمیه یا محدودیت درخواست Gemini پر شده.\n"
-                "کمی بعد دوباره امتحان کن."
+                "⏳ محدودیت درخواست یا سهمیه Gemini پر شده.\n"
+                "کمی بعد دوباره تلاش کن."
             )
 
         elif status >= 500:
@@ -346,10 +390,8 @@ def chat(message):
         else:
 
             text = (
-                "⚠️ خطای سرویس هوش مصنوعی."
+                "⚠️ خطایی در سرویس هوش مصنوعی رخ داده است."
             )
-
-        print("CHAT GEMINI ERROR:", repr(error))
 
         bot.send_message(
             message.chat.id,
@@ -358,25 +400,25 @@ def chat(message):
 
     except requests.exceptions.Timeout:
 
-        print("GEMINI TIMEOUT")
+        logger.exception("GEMINI TIMEOUT")
 
         bot.send_message(
             message.chat.id,
             "⏳ پاسخ طول کشید. لطفاً دوباره تلاش کن."
         )
 
-    except requests.exceptions.RequestException as error:
+    except requests.exceptions.RequestException:
 
-        print("GEMINI CONNECTION ERROR:", repr(error))
+        logger.exception("GEMINI CONNECTION ERROR")
 
         bot.send_message(
             message.chat.id,
             "🌐 اتصال به سرویس هوش مصنوعی برقرار نشد."
         )
 
-    except Exception as error:
+    except Exception:
 
-        print("CHAT ERROR:", repr(error))
+        logger.exception("CHAT ERROR")
 
         bot.send_message(
             message.chat.id,
@@ -390,13 +432,14 @@ def chat(message):
                 message.chat.id,
                 waiting.message_id
             )
+
         except Exception:
             pass
 
 
-# =================================
+# ==========================================
 # WEBHOOK SERVER
-# =================================
+# ==========================================
 
 class WebhookHandler(BaseHTTPRequestHandler):
 
@@ -405,6 +448,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if self.path == "/":
 
             self.send_response(200)
+
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
+            )
+
             self.end_headers()
 
             self.wfile.write(
@@ -428,6 +477,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         if received_secret != WEBHOOK_SECRET:
 
+            logger.warning("Invalid webhook secret")
             self.send_error(403)
             return
 
@@ -450,50 +500,69 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             update = telebot.types.Update.de_json(data)
 
+            logger.info(
+                "Telegram update received"
+            )
+
             bot.process_new_updates([update])
 
             self.send_response(200)
             self.end_headers()
+
             self.wfile.write(b"OK")
 
-        except Exception as error:
+        except Exception:
 
-            print("WEBHOOK ERROR:", repr(error))
+            logger.exception("WEBHOOK ERROR")
             self.send_error(500)
 
     def log_message(self, format, *args):
 
-        print("WEB:", format % args)
+        logger.info(
+            "WEBHOOK SERVER: %s",
+            format % args
+        )
 
 
-# =================================
-# RENDER START
-# =================================
+# ==========================================
+# START HOSHIWAR ON RENDER
+# ==========================================
 
 if __name__ == "__main__":
 
-    print("================================")
-    print("STARTING HOSHIWAR AI")
-    print("MODEL:", GEMINI_MODEL)
-    print("================================")
+    logger.info("================================")
+    logger.info("STARTING HOSHIWAR AI")
+    logger.info("MODEL: %s", GEMINI_MODEL)
+    logger.info("================================")
 
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         WebhookHandler
     )
 
-    bot.set_webhook(
-        url=WEBHOOK_URL,
-        secret_token=WEBHOOK_SECRET
-    )
-
-    print("WEBHOOK:", WEBHOOK_URL)
-    print("HOSHIWAR AI IS LIVE!")
-
     try:
 
+        webhook_result = bot.set_webhook(
+            url=WEBHOOK_URL,
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=["message"]
+        )
+
+        if not webhook_result:
+            raise RuntimeError("Telegram webhook setup failed")
+
+        logger.info("TELEGRAM WEBHOOK SET SUCCESSFULLY")
+        logger.info("WEBHOOK URL: %s", WEBHOOK_URL)
+        logger.info("HOSHIWAR AI IS LIVE!")
+
         server.serve_forever()
+
+    except Exception:
+
+        logger.exception("APPLICATION STARTUP ERROR")
+        raise
 
     finally:
 
         server.server_close()
+        logger.info("HOSHIWAR SERVER STOPPED")
