@@ -1,6 +1,5 @@
 import os
 import json
-import hashlib
 import requests
 import telebot
 
@@ -26,9 +25,11 @@ bot = telebot.TeleBot(BOT_TOKEN)
 WEBHOOK_PATH = "/telegram-webhook"
 WEBHOOK_URL = RENDER_URL.rstrip("/") + WEBHOOK_PATH
 
-WEBHOOK_SECRET = hashlib.sha256(
-    BOT_TOKEN.encode()
-).hexdigest()
+# Telegram secret token
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
+if not WEBHOOK_SECRET:
+    raise ValueError("WEBHOOK_SECRET is missing")
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
@@ -41,6 +42,7 @@ SYSTEM_PROMPT = """
 به زبان کاربر پاسخ بده.
 پاسخ‌هایت روشن، مفید و قابل فهم باشند.
 از ایموجی‌های شیک و به‌اندازه استفاده کن.
+تم بصری هشیوار آبی، نقره‌ای و سفید است.
 """
 
 
@@ -54,12 +56,10 @@ def ask_ai(message):
         "systemInstruction": {
             "parts": [{"text": SYSTEM_PROMPT}]
         },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": message}]
-            }
-        ],
+        "contents": [{
+            "role": "user",
+            "parts": [{"text": message}]
+        }],
         "generationConfig": {
             "temperature": 0.7,
             "maxOutputTokens": 2048
@@ -196,9 +196,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
 
-    print("Setting up Hoshiwar AI...")
-
-    bot.remove_webhook()
+    print("Starting Hoshiwar AI...")
 
     bot.set_webhook(
         url=WEBHOOK_URL,
@@ -206,11 +204,12 @@ if __name__ == "__main__":
     )
 
     print("Webhook:", WEBHOOK_URL)
-    print("Hoshiwar AI is running!")
 
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         WebhookHandler
     )
+
+    print("Hoshiwar AI is running!")
 
     server.serve_forever()
