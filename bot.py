@@ -1,10 +1,16 @@
 import os
+import json
+import hashlib
 import requests
 import telebot
 
-# تنظیمات ربات
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# HOSHIWAR AI SETTINGS
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+PORT = int(os.getenv("PORT", "10000"))
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -12,7 +18,17 @@ if not BOT_TOKEN:
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is missing")
 
+if not RENDER_URL:
+    raise ValueError("RENDER_EXTERNAL_URL is missing")
+
 bot = telebot.TeleBot(BOT_TOKEN)
+
+WEBHOOK_PATH = "/telegram-webhook"
+WEBHOOK_URL = RENDER_URL.rstrip("/") + WEBHOOK_PATH
+
+WEBHOOK_SECRET = hashlib.sha256(
+    BOT_TOKEN.encode()
+).hexdigest()
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
@@ -24,7 +40,9 @@ SYSTEM_PROMPT = """
 باهوش، مودب، صمیمی و دقیق.
 به زبان کاربر پاسخ بده.
 پاسخ‌هایت روشن، مفید و قابل فهم باشند.
+از ایموجی‌های شیک و به‌اندازه استفاده کن.
 """
+
 
 def ask_ai(message):
     headers = {
@@ -66,8 +84,10 @@ def start(message):
     bot.reply_to(
         message,
         "سلام! 👋\n\n"
-        "من هشیوار هستم؛ دستیار هوش مصنوعی شما. 🤖\n\n"
-        "هر سؤالی داری بپرس، من اینجام تا کمکت کنم."
+        "به هشیوار خوش اومدی. 💙\n"
+        "دستیار هوش مصنوعی تو آماده‌ست.\n\n"
+        "هر سؤالی داری بپرس؛\n"
+        "با هم بهترین جواب رو پیدا می‌کنیم. ✨"
     )
 
 
@@ -76,41 +96,121 @@ def help_command(message):
     bot.reply_to(
         message,
         "🤖 راهنمای هشیوار\n\n"
-        "سؤالت رو به صورت پیام برام بفرست.\n"
-        "من با هوش مصنوعی بهت پاسخ می‌دم."
+        "💬 سؤالت رو به‌صورت پیام بفرست.\n"
+        "✨ هشیوار با هوش مصنوعی بهت پاسخ می‌ده.\n\n"
+        "برای شروع از /start استفاده کن."
     )
 
 
 @bot.message_handler(func=lambda message: bool(message.text))
 def chat(message):
-    waiting = bot.reply_to(message, "⏳ هشیوار در حال فکر کردنه...")
+    waiting = bot.reply_to(
+        message,
+        "⏳ هشیوار در حال پردازش سؤالت..."
+    )
 
     try:
         answer = ask_ai(message.text)
 
-        if len(answer) > 4000:
-            for i in range(0, len(answer), 4000):
-                bot.send_message(message.chat.id, answer[i:i+4000])
-        else:
-            bot.send_message(message.chat.id, answer)
+        for i in range(0, len(answer), 4000):
+            bot.send_message(
+                message.chat.id,
+                answer[i:i + 4000]
+            )
 
     except requests.exceptions.Timeout:
-        bot.send_message(message.chat.id, "⏳ پاسخ کمی طول کشید. دوباره امتحان کن.")
+        bot.send_message(
+            message.chat.id,
+            "⏳ پاسخ کمی طول کشید. لطفاً دوباره تلاش کن."
+        )
 
-    except requests.exceptions.RequestException:
-        bot.send_message(message.chat.id, "⚠️ ارتباط با هوش مصنوعی برقرار نشد.")
+    except requests.exceptions.RequestException as error:
+        print("GEMINI ERROR:", error)
+        bot.send_message(
+            message.chat.id,
+            "⚠️ ارتباط با سرویس هوش مصنوعی برقرار نشد."
+        )
 
     except Exception as error:
         print("ERROR:", error)
-        bot.send_message(message.chat.id, "❌ مشکلی پیش اومد. لطفاً دوباره تلاش کن.")
+        bot.send_message(
+            message.chat.id,
+            "⚠️ مشکلی پیش اومد. لطفاً دوباره تلاش کن."
+        )
 
     finally:
         try:
-            bot.delete_message(message.chat.id, waiting.message_id)
+            bot.delete_message(
+                message.chat.id,
+                waiting.message_id
+            )
         except Exception:
             pass
 
 
-print("Hoshiwar AI Bot is running...")
+class WebhookHandler(BaseHTTPRequestHandler):
 
-bot.infinity_polling(skip_pending=True, timeout=30)
+    def do_GET(self):
+        if self.path == "/":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Hoshiwar AI is running!")
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        if self.path != WEBHOOK_PATH:
+            self.send_error(404)
+            return
+
+        received_secret = self.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token"
+        )
+
+        if received_secret != WEBHOOK_SECRET:
+            self.send_error(403)
+            return
+
+        try:
+            length = int(
+                self.headers.get("Content-Length", 0)
+            )
+
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8"))
+
+            update = telebot.types.Update.de_json(data)
+            bot.process_new_updates([update])
+
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        except Exception as error:
+            print("WEBHOOK ERROR:", error)
+            self.send_error(500)
+
+    def log_message(self, format, *args):
+        print("WEB:", format % args)
+
+
+if __name__ == "__main__":
+
+    print("Setting up Hoshiwar AI...")
+
+    bot.remove_webhook()
+
+    bot.set_webhook(
+        url=WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET
+    )
+
+    print("Webhook:", WEBHOOK_URL)
+    print("Hoshiwar AI is running!")
+
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", PORT),
+        WebhookHandler
+    )
+
+    server.serve_forever()
