@@ -11,32 +11,18 @@ import telebot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ==========================================
-# HOSHIWAR AI - CONFIGURATION
+# HOSHIVAR AI - CONFIGURATION
 # ==========================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 WEBHOOK_PATH = "/telegram-webhook"
-
-# ==========================================
-# LOGGING
-# ==========================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-
-logger = logging.getLogger("HOSHIWAR")
-
-# ==========================================
-# CONFIGURATION VALIDATION
-# ==========================================
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -61,6 +47,17 @@ GEMINI_URL = (
 )
 
 # ==========================================
+# LOGGING
+# ==========================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+logger = logging.getLogger("HOSHIWAR")
+
+# ==========================================
 # TELEGRAM BOT
 # ==========================================
 
@@ -71,7 +68,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # ==========================================
 
 SYSTEM_PROMPT = """
-تو هشیوار هستی؛ یک دستیار هوش مصنوعی فارسی‌زبان
+تو هشیوار هستی؛ یک دستیار هوش مصنوعی فارسی‌زبان،
 باهوش، دقیق، مودب، صمیمی و حرفه‌ای.
 
 قوانین تو:
@@ -84,6 +81,7 @@ SYSTEM_PROMPT = """
 - از ایموجی به اندازه استفاده کن.
 - خودت را هشیوار معرفی کن.
 - با کاربران محترمانه و دوستانه صحبت کن.
+- از قلب قرمز ❤️ در موقعیت‌های مناسب استفاده کن.
 """
 
 # ==========================================
@@ -177,26 +175,44 @@ def ask_ai(message, memory_key):
         }
     }
 
-    max_attempts = 2
+    max_attempts = 3
     response = None
 
     for attempt in range(max_attempts):
 
         try:
             logger.info(
-                "Sending Gemini request. Attempt %s/%s",
+                "Gemini request attempt %s/%s",
                 attempt + 1,
                 max_attempts
             )
 
-            logger.info("Gemini model: %s", GEMINI_MODEL)
+            logger.info(
+                "Gemini model: %s",
+                GEMINI_MODEL
+            )
 
             response = requests.post(
                 GEMINI_URL,
                 headers=headers,
                 json=payload,
-                timeout=(15, 60)
+                timeout=(20, 120)
             )
+
+            # Retry temporary server and quota errors
+            if response.status_code in (
+                429, 500, 502, 503, 504
+            ):
+
+                if attempt + 1 < max_attempts:
+
+                    logger.warning(
+                        "Gemini temporary HTTP error: %s",
+                        response.status_code
+                    )
+
+                    time.sleep(2 * (attempt + 1))
+                    continue
 
             break
 
@@ -205,15 +221,19 @@ def ask_ai(message, memory_key):
             requests.exceptions.ConnectionError
         ):
 
-            logger.exception("GEMINI CONNECTION/TIMEOUT ERROR")
+            logger.exception(
+                "GEMINI CONNECTION/TIMEOUT ERROR"
+            )
 
             if attempt + 1 >= max_attempts:
                 raise
 
             logger.warning("Retrying Gemini request...")
-            time.sleep(2)
+
+            time.sleep(2 * (attempt + 1))
 
         except requests.exceptions.RequestException:
+
             logger.exception("GEMINI NETWORK ERROR")
             raise
 
@@ -221,7 +241,7 @@ def ask_ai(message, memory_key):
         raise RuntimeError("Gemini request failed")
 
     logger.info(
-        "Gemini HTTP STATUS: %s",
+        "GEMINI HTTP STATUS: %s",
         response.status_code
     )
 
@@ -240,7 +260,10 @@ def ask_ai(message, memory_key):
         except ValueError:
             detail = response.text[:2000]
 
-        logger.error("GEMINI ERROR: %s", detail)
+        logger.error(
+            "GEMINI ERROR DETAIL: %s",
+            detail
+        )
 
         raise GeminiAPIError(
             response.status_code,
@@ -251,7 +274,6 @@ def ask_ai(message, memory_key):
         result = response.json()
 
     except ValueError:
-        logger.error("Invalid Gemini JSON")
         raise ValueError("Invalid Gemini JSON")
 
     candidates = result.get("candidates", [])
@@ -291,7 +313,9 @@ def ask_ai(message, memory_key):
         answer
     )
 
-    logger.info("Gemini response received successfully")
+    logger.info(
+        "Gemini response received successfully"
+    )
 
     return answer
 
@@ -308,7 +332,6 @@ def send_long_message(chat_id, text):
 
         chunk = text[start:start + max_length]
 
-        # ارسال بدون Markdown برای جلوگیری از خطای قالب‌بندی
         bot.send_message(
             chat_id,
             chunk
@@ -325,7 +348,7 @@ def start(message):
     bot.reply_to(
         message,
         "سلام! 👋\n\n"
-        "به هشیوار خوش اومدی. 💙\n\n"
+        "به هشیوار خوش اومدی. ❤️\n\n"
         "من دستیار هوش مصنوعی تو هستم.\n"
         "هر سؤالی داری بپرس؛ با هم بهترین جواب رو پیدا می‌کنیم. ✨\n\n"
         "برای راهنما: /help\n"
@@ -354,7 +377,7 @@ def reset_command(message):
 
     bot.reply_to(
         message,
-        "🔄 حافظه گفتگو پاک شد."
+        "🔄 حافظه گفتگو پاک شد. ❤️"
     )
 
 
@@ -374,7 +397,6 @@ def chat(message):
 
     try:
 
-        # جلوگیری از تداخل درخواست‌های یک گفتگو
         with get_chat_lock(memory_key):
 
             answer = ask_ai(
@@ -396,7 +418,8 @@ def chat(message):
         if status in (400, 401, 403, 404):
 
             text = (
-                "⚠️ خطای دسترسی یا درخواست نامعتبر به هوش مصنوعی."
+                "⚠️ خطای دسترسی یا درخواست نامعتبر به هوش مصنوعی.\n"
+                "مدیر ربات باید مدل و تنظیمات API را بررسی کند."
             )
 
         elif status == 429:
@@ -410,7 +433,7 @@ def chat(message):
 
             text = (
                 "🔥 سرویس Gemini با مشکل روبه‌رو شده.\n"
-                "لطفاً کمی بعد دوباره تلاش کن."
+                "لطفاً کمی بعد تلاش کن."
             )
 
         else:
@@ -419,7 +442,10 @@ def chat(message):
                 "⚠️ خطایی در سرویس هوش مصنوعی رخ داده است."
             )
 
-        bot.send_message(message.chat.id, text)
+        bot.send_message(
+            message.chat.id,
+            text
+        )
 
     except requests.exceptions.Timeout:
 
@@ -482,7 +508,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             self.wfile.write(
-                b"Hoshiwar AI Bot is active and running!"
+                b"Hoshivar AI Bot is active and running!"
             )
 
         else:
