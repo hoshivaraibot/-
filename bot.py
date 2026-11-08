@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 import telebot
 
@@ -24,11 +25,11 @@ if not GEMINI_API_KEY:
 if not WEBHOOK_SECRET:
     raise ValueError("WEBHOOK_SECRET is missing")
 
+if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
+    raise ValueError("WEBHOOK_SECRET has illegal characters")
+
 if not RENDER_URL:
     raise ValueError("RENDER_EXTERNAL_URL is missing")
-
-if not (1 <= len(WEBHOOK_SECRET) <= 256):
-    raise ValueError("WEBHOOK_SECRET length is invalid")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -80,11 +81,30 @@ def ask_ai(message):
         timeout=60
     )
 
-    response.raise_for_status()
+    if not response.ok:
+        print("GEMINI STATUS:", response.status_code)
+        print("GEMINI RESPONSE:", response.text[:3000])
+        response.raise_for_status()
 
     result = response.json()
 
-    return result["candidates"][0]["content"]["parts"][0]["text"]
+    candidates = result.get("candidates", [])
+
+    if not candidates:
+        print("GEMINI EMPTY RESPONSE:", result)
+        raise ValueError("Gemini returned no candidates")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+
+    answer = "".join(
+        part.get("text", "")
+        for part in parts
+    ).strip()
+
+    if not answer:
+        raise ValueError("Gemini returned empty text")
+
+    return answer
 
 
 # =================================
@@ -116,6 +136,10 @@ def help_command(message):
     )
 
 
+# =================================
+# AI CHAT
+# =================================
+
 @bot.message_handler(
     func=lambda message: bool(message.text)
 )
@@ -139,23 +163,48 @@ def chat(message):
 
     except requests.exceptions.Timeout:
 
+        print("GEMINI ERROR: Request timed out")
+
         bot.send_message(
             message.chat.id,
             "⏳ پاسخ کمی طول کشید. دوباره تلاش کن."
         )
 
+    except requests.exceptions.HTTPError as error:
+
+        print("GEMINI HTTP ERROR:", error)
+
+        status = error.response.status_code
+
+        if status == 400:
+            text = "⚠️ درخواست هوش مصنوعی نامعتبر بود."
+
+        elif status == 401 or status == 403:
+            text = "🔑 کلید API یا دسترسی هوش مصنوعی مشکل دارد."
+
+        elif status == 429:
+            text = "⏳ محدودیت درخواست هوش مصنوعی پر شده است."
+
+        elif status >= 500:
+            text = "🔧 سرور هوش مصنوعی موقتاً مشکل دارد."
+
+        else:
+            text = "⚠️ ارتباط با هوش مصنوعی برقرار نشد."
+
+        bot.send_message(message.chat.id, text)
+
     except requests.exceptions.RequestException as error:
 
-        print("GEMINI ERROR:", error)
+        print("GEMINI CONNECTION ERROR:", repr(error))
 
         bot.send_message(
             message.chat.id,
-            "⚠️ ارتباط با هوش مصنوعی برقرار نشد."
+            "🌐 خطا در اتصال به سرویس هوش مصنوعی."
         )
 
     except Exception as error:
 
-        print("ERROR:", error)
+        print("CHAT ERROR:", repr(error))
 
         bot.send_message(
             message.chat.id,
@@ -190,13 +239,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             )
 
         else:
-
             self.send_error(404)
 
     def do_POST(self):
 
         if self.path != WEBHOOK_PATH:
-
             self.send_error(404)
             return
 
@@ -205,7 +252,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         )
 
         if received_secret != WEBHOOK_SECRET:
-
             self.send_error(403)
             return
 
@@ -221,9 +267,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             body = self.rfile.read(length)
 
-            data = json.loads(
-                body.decode("utf-8")
-            )
+            data = json.loads(body.decode("utf-8"))
 
             update = telebot.types.Update.de_json(data)
 
@@ -235,11 +279,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         except Exception as error:
 
-            print("WEBHOOK ERROR:", error)
+            print("WEBHOOK ERROR:", repr(error))
             self.send_error(500)
 
     def log_message(self, format, *args):
-
         print("WEB:", format % args)
 
 
@@ -266,5 +309,6 @@ if __name__ == "__main__":
 
     try:
         server.serve_forever()
+
     finally:
         server.server_close()
