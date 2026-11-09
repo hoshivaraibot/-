@@ -10,20 +10,18 @@ import telebot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-# ==================================================
+# =========================================================
 # HOSHIVAR AI - CONFIGURATION
-# ==================================================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 
-GEMINI_MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3.8-flash"
-)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.7")
 
 PORT = int(os.getenv("PORT", "10000"))
-
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
@@ -34,6 +32,9 @@ if not BOT_TOKEN:
 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is missing")
+
+if not GROK_API_KEY:
+    raise ValueError("GROK_API_KEY is missing")
 
 if not WEBHOOK_SECRET:
     raise ValueError("WEBHOOK_SECRET is missing")
@@ -50,137 +51,116 @@ GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
     f"models/{GEMINI_MODEL}:generateContent"
 )
+GROK_URL = "https://api.x.ai/v1/responses"
 
 
-# ==================================================
+# =========================================================
 # LOGGING
-# ==================================================
+# =========================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
 logger = logging.getLogger("HOSHIVAR")
 
 
-# ==================================================
+# =========================================================
 # TELEGRAM BOT
-# ==================================================
+# =========================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 
-# ==================================================
+# =========================================================
 # HOSHIVAR PERSONALITY
-# ==================================================
+# =========================================================
 
 SYSTEM_PROMPT = """
 تو هشیوار هستی؛ یک دستیار هوش مصنوعی فارسی‌زبان،
 باهوش، دقیق، مودب، صمیمی و حرفه‌ای.
 
-قوانین تو:
-
+قوانین:
 - به زبان کاربر پاسخ بده.
 - فارسی را روان و طبیعی بنویس.
-- پاسخ دقیق و کاربردی ارائه کن.
+- پاسخ دقیق، کاربردی و منظم ارائه کن.
 - در صورت نیاز توضیحات مرحله‌به‌مرحله بده.
 - در برنامه‌نویسی کد صحیح و قابل اجرا ارائه کن.
-- اگر چیزی را نمی‌دانی، صادقانه بگو.
+- اگر چیزی را نمی‌دانی، صادقانه بگو و حدس را جای واقعیت نگذار.
 - از ایموجی به اندازه استفاده کن.
 - خودت را هشیوار معرفی کن.
+- نام سرویس‌ها و مدل‌های پشتیبان را برای کاربر مطرح نکن.
 - با کاربران محترمانه و دوستانه صحبت کن.
 - از قلب قرمز ❤️ در موقعیت‌های مناسب استفاده کن.
 """
 
 
-# ==================================================
-# CHAT MEMORY
-# ==================================================
+# =========================================================
+# CHAT MEMORY AND LOCKS
+# =========================================================
 
 chat_memory = {}
 memory_lock = threading.Lock()
 
-MAX_HISTORY = 10
-
 chat_locks = {}
 chat_locks_lock = threading.Lock()
 
+MAX_HISTORY = 10
+
 
 def get_chat_lock(key):
-
     with chat_locks_lock:
-
         if key not in chat_locks:
             chat_locks[key] = threading.Lock()
-
         return chat_locks[key]
 
 
 def get_history(key):
-
     with memory_lock:
         return list(chat_memory.get(key, []))
 
 
 def save_history(key, user_message, ai_answer):
-
     with memory_lock:
-
         history = chat_memory.get(key, [])
-
         history.append({
             "role": "user",
             "parts": [{"text": user_message}]
         })
-
         history.append({
             "role": "model",
             "parts": [{"text": ai_answer}]
         })
-
         chat_memory[key] = history[-MAX_HISTORY * 2:]
 
 
 def clear_history(key):
-
     with memory_lock:
         chat_memory.pop(key, None)
 
 
-# ==================================================
-# GEMINI ERROR HANDLING
-# ==================================================
+# =========================================================
+# PROVIDER ERRORS AND GEMINI QUOTA COOLDOWN
+# =========================================================
 
-class GeminiAPIError(Exception):
-
-    def __init__(self, status, detail):
-
+class ProviderAPIError(Exception):
+    def __init__(self, provider, status, detail):
+        self.provider = provider
         self.status = status
         self.detail = detail
+        super().__init__(f"{provider} HTTP {status}: {detail}")
 
-        super().__init__(
-            f"Gemini HTTP {status}: {detail}"
-        )
-
-
-# ==================================================
-# GEMINI QUOTA PROTECTION
-# ==================================================
 
 quota_lock = threading.Lock()
-
 gemini_blocked_until = 0.0
 
 
 def get_retry_delay(detail):
-
     match = re.search(
         r"retry in (?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?",
         detail,
         re.IGNORECASE
     )
-
     if not match:
         return 60
 
@@ -188,73 +168,49 @@ def get_retry_delay(detail):
     minutes = int(match.group(2) or 0)
     seconds = float(match.group(3) or 0)
 
-    return max(
-        60,
-        int(hours * 3600 + minutes * 60 + seconds)
-    )
+    return max(60, int(hours * 3600 + minutes * 60 + seconds))
 
 
-def activate_quota_cooldown(detail):
-
+def activate_gemini_cooldown(detail):
     global gemini_blocked_until
-
     delay = get_retry_delay(detail)
 
     with quota_lock:
-
         gemini_blocked_until = max(
             gemini_blocked_until,
             time.time() + delay
         )
 
-    logger.warning(
-        "Gemini cooldown activated for %s seconds",
-        delay
-    )
+    logger.warning("Primary provider cooldown activated for %s seconds", delay)
 
 
-def quota_remaining():
-
+def gemini_cooldown_remaining():
     with quota_lock:
-
-        return max(
-            0,
-            int(gemini_blocked_until - time.time())
-        )
+        return max(0, int(gemini_blocked_until - time.time()))
 
 
-def format_wait_time(seconds):
-
-    hours, remainder = divmod(
-        max(0, seconds),
-        3600
-    )
-
-    minutes = remainder // 60
-
-    if hours:
-        return f"{hours} ساعت و {minutes} دقیقه"
-
-    if minutes:
-        return f"{minutes} دقیقه"
-
-    return "کمتر از یک دقیقه"
+def extract_error_detail(response):
+    try:
+        data = response.json()
+        error = data.get("error", {})
+        if isinstance(error, dict):
+            return str(error.get("message") or response.text[:1500])
+        return response.text[:1500]
+    except (ValueError, AttributeError):
+        return response.text[:1500]
 
 
-# ==================================================
-# GEMINI AI ENGINE
-# ==================================================
+# =========================================================
+# GEMINI - PRIMARY ENGINE
+# =========================================================
 
-def ask_ai(message, memory_key):
-
-    # Stop requests while quota cooldown is active.
-    remaining = quota_remaining()
-
+def ask_gemini(message, memory_key):
+    remaining = gemini_cooldown_remaining()
     if remaining > 0:
-
-        raise GeminiAPIError(
+        raise ProviderAPIError(
+            "primary",
             429,
-            "Gemini quota cooldown is active."
+            f"Quota cooldown active for {remaining} seconds"
         )
 
     headers = {
@@ -262,483 +218,318 @@ def ask_ai(message, memory_key):
         "x-goog-api-key": GEMINI_API_KEY
     }
 
-    history = get_history(memory_key)
-
-    contents = history + [{
+    contents = get_history(memory_key) + [{
         "role": "user",
         "parts": [{"text": message}]
     }]
 
     payload = {
-
         "systemInstruction": {
-            "parts": [
-                {"text": SYSTEM_PROMPT}
-            ]
+            "parts": [{"text": SYSTEM_PROMPT}]
         },
-
         "contents": contents,
-
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 1024
+            "maxOutputTokens": 2048
         }
     }
 
-    # Only one retry for temporary errors.
-    # Never retry HTTP 429.
-
-    max_attempts = 2
-
     response = None
 
-    for attempt in range(max_attempts):
-
+    # Retry once only for transient server/network errors.
+    for attempt in range(2):
         try:
-
-            logger.info(
-                "Gemini request attempt %s/%s",
-                attempt + 1,
-                max_attempts
-            )
-
-            logger.info(
-                "Gemini model: %s",
-                GEMINI_MODEL
-            )
-
             response = requests.post(
                 GEMINI_URL,
                 headers=headers,
                 json=payload,
                 timeout=(20, 90)
             )
-
-            # Quota or rate limit error.
-            if response.status_code == 429:
-
-                try:
-
-                    error_data = response.json()
-
-                    detail = error_data.get(
-                        "error", {}
-                    ).get(
-                        "message",
-                        response.text[:2000]
-                    )
-
-                except ValueError:
-
-                    detail = response.text[:2000]
-
-                activate_quota_cooldown(detail)
-
-                logger.error(
-                    "GEMINI HTTP 429: %s",
-                    detail
-                )
-
-                raise GeminiAPIError(
-                    429,
-                    detail
-                )
-
-            # Temporary server errors.
-            if response.status_code in (
-                500,
-                502,
-                503,
-                504
-            ):
-
-                if attempt + 1 < max_attempts:
-
-                    logger.warning(
-                        "Gemini temporary HTTP error: %s",
-                        response.status_code
-                    )
-
-                    time.sleep(2)
-
-                    continue
-
-            break
-
-        except GeminiAPIError:
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError):
+            logger.exception("Primary AI connection/timeout error")
+            if attempt == 0:
+                time.sleep(2)
+                continue
             raise
 
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.ConnectionError
-        ):
+        if response.status_code == 429:
+            detail = extract_error_detail(response)
+            activate_gemini_cooldown(detail)
+            raise ProviderAPIError("primary", 429, detail)
 
-            logger.exception(
-                "GEMINI CONNECTION/TIMEOUT ERROR"
-            )
-
-            if attempt + 1 >= max_attempts:
-                raise
-
-            logger.warning(
-                "Retrying Gemini once..."
-            )
-
+        if response.status_code in (500, 502, 503, 504) and attempt == 0:
+            logger.warning("Primary AI temporary server error: %s",
+                           response.status_code)
             time.sleep(2)
+            continue
 
-        except requests.exceptions.RequestException:
-
-            logger.exception(
-                "GEMINI NETWORK ERROR"
-            )
-
-            raise
+        break
 
     if response is None:
+        raise RuntimeError("Primary AI returned no HTTP response")
 
-        raise RuntimeError(
-            "Gemini request failed"
-        )
-
-    logger.info(
-        "GEMINI HTTP STATUS: %s",
-        response.status_code
-    )
-
-    # Handle other API errors.
     if not response.ok:
+        detail = extract_error_detail(response)
+        logger.error("Primary AI API error: %s", detail)
+        raise ProviderAPIError("primary", response.status_code, detail)
 
-        try:
-
-            error_data = response.json()
-
-            detail = error_data.get(
-                "error", {}
-            ).get(
-                "message",
-                response.text[:2000]
-            )
-
-        except ValueError:
-
-            detail = response.text[:2000]
-
-        logger.error(
-            "GEMINI ERROR DETAIL: %s",
-            detail
-        )
-
-        raise GeminiAPIError(
-            response.status_code,
-            detail
-        )
-
-    # Parse Gemini response.
     try:
-
         result = response.json()
-
     except ValueError:
+        raise RuntimeError("Primary AI returned invalid JSON")
 
-        raise ValueError(
-            "Invalid Gemini JSON"
-        )
-
-    candidates = result.get(
-        "candidates",
-        []
-    )
-
+    candidates = result.get("candidates", [])
     if not candidates:
+        block_reason = result.get("promptFeedback", {}).get("blockReason")
+        raise RuntimeError(f"Primary AI returned no candidates: {block_reason}")
 
-        block_reason = result.get(
-            "promptFeedback", {}
-        ).get("blockReason")
-
-        logger.error(
-            "GEMINI EMPTY CANDIDATES: %s",
-            json.dumps(
-                result,
-                ensure_ascii=False
-            )[:3000]
-        )
-
-        raise ValueError(
-            f"Gemini returned no candidates: {block_reason}"
-        )
-
-    candidate = candidates[0]
-
-    parts = candidate.get(
-        "content", {}
-    ).get(
-        "parts", []
-    )
-
+    parts = candidates[0].get("content", {}).get("parts", [])
     answer = "".join(
         part.get("text", "")
         for part in parts
+        if isinstance(part, dict)
     ).strip()
 
     if not answer:
+        raise RuntimeError("Primary AI returned empty text")
 
-        raise ValueError(
-            "Gemini returned empty text"
-        )
-
-    # Save conversation only after success.
-    save_history(
-        memory_key,
-        message,
-        answer
-    )
-
-    logger.info(
-        "Gemini response received successfully"
-    )
-
+    logger.info("Primary AI response received")
     return answer
 
 
-# ==================================================
-# TELEGRAM MESSAGE SENDER
-# ==================================================
+# =========================================================
+# GROK - AUTOMATIC BACKUP ENGINE
+# =========================================================
 
-def send_long_message(chat_id, text):
+def ask_grok(message, memory_key):
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    max_length = 4000
+    grok_input = [{
+        "role": "system",
+        "content": SYSTEM_PROMPT
+    }]
 
-    for start in range(
-        0,
-        len(text),
-        max_length
-    ):
+    for item in get_history(memory_key):
+        role = "assistant" if item.get("role") == "model" else "user"
+        content = "".join(
+            part.get("text", "")
+            for part in item.get("parts", [])
+            if isinstance(part, dict)
+        ).strip()
 
-        chunk = text[
-            start:start + max_length
-        ]
+        if content:
+            grok_input.append({
+                "role": role,
+                "content": content
+            })
 
+    grok_input.append({
+        "role": "user",
+        "content": message
+    })
+
+    payload = {
+        "model": GROK_MODEL,
+        "input": grok_input,
+        "temperature": 0.7,
+        "max_output_tokens": 2048
+    }
+
+    logger.warning("Automatic backup engine activated")
+
+    response = requests.post(
+        GROK_URL,
+        headers=headers,
+        json=payload,
+        timeout=(20, 120)
+    )
+
+    if not response.ok:
+        detail = extract_error_detail(response)
+        logger.error("Backup AI API error: %s", detail)
+        raise ProviderAPIError("backup", response.status_code, detail)
+
+    try:
+        result = response.json()
+    except ValueError:
+        raise RuntimeError("Backup AI returned invalid JSON")
+
+    answer_parts = []
+    for item in result.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []):
+            if part.get("type") == "output_text":
+                answer_parts.append(part.get("text", ""))
+
+    answer = "".join(answer_parts).strip()
+
+    if not answer:
+        logger.error(
+            "Backup AI returned empty response: %s",
+            json.dumps(result, ensure_ascii=False)[:1500]
+        )
+        raise RuntimeError("Backup AI returned empty text")
+
+    logger.info("Backup AI response received")
+    return answer
+
+
+# =========================================================
+# SMART FAILOVER - USERS SEE ONLY HOSHIVAR
+# =========================================================
+
+def ask_ai(message, memory_key):
+    try:
+        answer = ask_gemini(message, memory_key)
+
+    except ProviderAPIError as error:
+        # Switch only for quota/rate limits or temporary service failures.
+        fallback_allowed = error.status in (408, 429, 500, 502, 503, 504)
+
+        if not fallback_allowed:
+            raise
+
+        logger.warning(
+            "Primary AI unavailable (HTTP %s); trying backup",
+            error.status
+        )
+        answer = ask_grok(message, memory_key)
+
+    except (requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError):
+        logger.warning("Primary AI network unavailable; trying backup")
+        answer = ask_grok(message, memory_key)
+
+    save_history(memory_key, message, answer)
+    return answer
+
+
+# =========================================================
+# TELEGRAM MESSAGE UTILITIES
+# =========================================================
+
+def send_long_message(chat_id, message_text):
+    max_length = 3900
+
+    for start in range(0, len(message_text), max_length):
         bot.send_message(
             chat_id,
-            chunk
+            message_text[start:start + max_length]
         )
 
 
-# ==================================================
+def send_generic_error(chat_id):
+    bot.send_message(
+        chat_id,
+        "⚠️ هشیوار فعلاً نتونست پاسخ رو آماده کنه.\n"
+        "لطفاً کمی بعد دوباره تلاش کن. ❤️"
+    )
+
+
+# =========================================================
 # TELEGRAM COMMANDS
-# ==================================================
+# =========================================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-
     bot.reply_to(
         message,
-
         "سلام! 👋\n\n"
         "به هشیوار خوش اومدی. ❤️\n\n"
         "من دستیار هوش مصنوعی تو هستم.\n"
         "هر سؤالی داری بپرس؛ با هم بهترین جواب رو پیدا می‌کنیم. ✨\n\n"
         "برای راهنما: /help\n"
-        "برای پاک کردن حافظه: /reset"
+        "برای پاک کردن حافظه گفتگو: /reset"
     )
 
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
-
     bot.reply_to(
         message,
-
         "🤖 راهنمای هشیوار\n\n"
         "💬 هر سؤالی داری بفرست.\n"
-        "🧠 حافظه مکالمات فعال است.\n"
+        "🧠 حافظه گفتگو در زمان فعال بودن ربات نگهداری می‌شود.\n"
         "🔄 برای پاک کردن حافظه از /reset استفاده کن."
     )
 
 
 @bot.message_handler(commands=["reset"])
 def reset_command(message):
-
-    memory_key = str(
-        message.chat.id
-    )
-
-    clear_history(memory_key)
-
-    bot.reply_to(
-        message,
-        "🔄 حافظه گفتگو پاک شد. ❤️"
-    )
+    clear_history(str(message.chat.id))
+    bot.reply_to(message, "🔄 حافظه این گفتگو پاک شد. ❤️")
 
 
-# ==================================================
+# =========================================================
 # TELEGRAM AI CHAT
-# ==================================================
+# =========================================================
 
 @bot.message_handler(content_types=["text"])
 def chat(message):
-
-    memory_key = str(
-        message.chat.id
-    )
-
+    memory_key = str(message.chat.id)
     waiting = bot.send_message(
         message.chat.id,
         "⏳ هشیوار داره فکر می‌کنه..."
     )
 
     try:
-
         with get_chat_lock(memory_key):
+            answer = ask_ai(message.text, memory_key)
 
-            answer = ask_ai(
-                message.text,
-                memory_key
-            )
+        send_long_message(message.chat.id, answer)
 
-        send_long_message(
-            message.chat.id,
-            answer
-        )
-
-    except GeminiAPIError as error:
-
+    except ProviderAPIError as error:
         logger.exception(
-            "CHAT GEMINI ERROR"
+            "Both AI engines could not complete the request; last provider=%s",
+            error.provider
         )
+        send_generic_error(message.chat.id)
 
-        status = error.status
-
-        if status in (400, 401, 403, 404):
-
-            text = (
-                "⚠️ خطای دسترسی یا درخواست نامعتبر به هوش مصنوعی.\n"
-                "مدیر ربات باید تنظیمات API را بررسی کند."
-            )
-
-        elif status == 429:
-
-            remaining = quota_remaining()
-
-            if remaining > 0:
-
-                text = (
-                    "⏳ سهمیه رایگان Gemini هشیوار فعلاً تمام شده.\n"
-                    f"زمان تقریبی بازگشت پاسخ‌گویی: "
-                    f"{format_wait_time(remaining)} دیگر.\n"
-                    "تا آن زمان درخواست اضافی ارسال نمی‌کنم. ❤️"
-                )
-
-            else:
-
-                text = (
-                    "⏳ Gemini موقتاً محدودیت درخواست اعمال کرده.\n"
-                    "لطفاً یک دقیقه بعد دوباره تلاش کن. ❤️"
-                )
-
-        elif status >= 500:
-
-            text = (
-                "🔥 سرویس Gemini با مشکل روبه‌رو شده.\n"
-                "لطفاً کمی بعد تلاش کن."
-            )
-
-        else:
-
-            text = (
-                "⚠️ خطایی در سرویس هوش مصنوعی رخ داده است."
-            )
-
-        bot.send_message(
-            message.chat.id,
-            text
-        )
-
-    except requests.exceptions.Timeout:
-
-        logger.exception(
-            "GEMINI TIMEOUT"
-        )
-
-        bot.send_message(
-            message.chat.id,
-
-            "⏳ پاسخ هوش مصنوعی بیش از حد طول کشید.\n"
-            "لطفاً کمی بعد دوباره تلاش کن. ❤️"
-        )
-
-    except requests.exceptions.RequestException:
-
-        logger.exception(
-            "GEMINI CONNECTION ERROR"
-        )
-
-        bot.send_message(
-            message.chat.id,
-
-            "🌐 اتصال به سرویس هوش مصنوعی برقرار نشد."
-        )
+    except (requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError):
+        logger.exception("AI network failure")
+        send_generic_error(message.chat.id)
 
     except Exception:
-
-        logger.exception(
-            "CHAT ERROR"
-        )
-
-        bot.send_message(
-            message.chat.id,
-
-            "⚠️ خطای غیرمنتظره‌ای رخ داد.\n"
-            "لطفاً دوباره تلاش کن."
-        )
+        logger.exception("Unexpected chat handler error")
+        send_generic_error(message.chat.id)
 
     finally:
-
         try:
-
             bot.delete_message(
                 message.chat.id,
                 waiting.message_id
             )
-
         except Exception:
-
             pass
 
 
-# ==================================================
+# =========================================================
 # WEBHOOK SERVER
-# ==================================================
+# =========================================================
 
 class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-
-        if self.path == "/":
-
+        if self.path in ("/", "/health"):
             self.send_response(200)
-
             self.send_header(
                 "Content-Type",
                 "text/plain; charset=utf-8"
             )
-
             self.end_headers()
-
-            self.wfile.write(
-                b"Hoshivar AI Bot is active and running!"
-            )
-
+            self.wfile.write(b"Hoshiwar AI Bot is running")
         else:
-
             self.send_error(404)
 
     def do_POST(self):
-
         if self.path != WEBHOOK_PATH:
-
             self.send_error(404)
-
             return
 
         received_secret = self.headers.get(
@@ -746,103 +537,48 @@ class WebhookHandler(BaseHTTPRequestHandler):
         )
 
         if received_secret != WEBHOOK_SECRET:
-
-            logger.warning(
-                "Invalid webhook secret"
-            )
-
+            logger.warning("Rejected webhook with invalid secret")
             self.send_error(403)
-
             return
 
         try:
-
             content_length = int(
-                self.headers.get(
-                    "Content-Length",
-                    0
-                )
+                self.headers.get("Content-Length", "0")
             )
 
-            if (
-                content_length <= 0
-                or content_length > 1_000_000
-            ):
-
+            if content_length <= 0 or content_length > 1_000_000:
                 self.send_error(400)
-
                 return
 
-            post_data = self.rfile.read(
-                content_length
-            )
-
-            data = post_data.decode(
-                "utf-8"
-            )
-
+            raw_data = self.rfile.read(content_length)
             update = telebot.types.Update.de_json(
-                data
+                raw_data.decode("utf-8")
             )
 
-            logger.info(
-                "Telegram update received"
-            )
-
-            bot.process_new_updates(
-                [update]
-            )
+            bot.process_new_updates([update])
 
             self.send_response(200)
-
             self.end_headers()
-
-            self.wfile.write(
-                b"OK"
-            )
+            self.wfile.write(b"OK")
 
         except Exception:
-
-            logger.exception(
-                "WEBHOOK ERROR"
-            )
-
+            logger.exception("Webhook processing error")
             self.send_error(500)
 
-    def log_message(
-        self,
-        format,
-        *app_args
-    ):
-
-        logger.info(
-            "WEBHOOK SERVER: %s",
-            format % app_args
-        )
+    def log_message(self, format, *args):
+        logger.info("WEBHOOK: %s", format % args)
 
 
-# ==================================================
+# =========================================================
 # START HOSHIVAR ON RENDER
-# ==================================================
+# =========================================================
 
 if __name__ == "__main__":
-
-    logger.info(
-        "================================"
-    )
-
-    logger.info(
-        "STARTING HOSHIVAR AI"
-    )
-
-    logger.info(
-        "MODEL: %s",
-        GEMINI_MODEL
-    )
-
-    logger.info(
-        "================================"
-    )
+    logger.info("================================")
+    logger.info("STARTING HOSHIVAR AI")
+    logger.info("Primary model configured: %s", GEMINI_MODEL)
+    logger.info("Automatic backup model configured: %s", GROK_MODEL)
+    logger.info("================================")
 
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
@@ -850,7 +586,6 @@ if __name__ == "__main__":
     )
 
     try:
-
         webhook_result = bot.set_webhook(
             url=WEBHOOK_URL,
             secret_token=WEBHOOK_SECRET,
@@ -858,38 +593,17 @@ if __name__ == "__main__":
         )
 
         if not webhook_result:
+            raise RuntimeError("Telegram webhook setup failed")
 
-            raise RuntimeError(
-                "Telegram webhook setup failed"
-            )
-
-        logger.info(
-            "TELEGRAM WEBHOOK SET SUCCESSFULLY"
-        )
-
-        logger.info(
-            "WEBHOOK URL: %s",
-            WEBHOOK_URL
-        )
-
-        logger.info(
-            "HOSHIVAR AI IS LIVE!"
-        )
+        logger.info("Telegram webhook configured successfully")
+        logger.info("Hoshiwar is live")
 
         server.serve_forever()
 
     except Exception:
-
-        logger.exception(
-            "APPLICATION STARTUP ERROR"
-        )
-
+        logger.exception("Application startup error")
         raise
 
     finally:
-
         server.server_close()
-
-        logger.info(
-            "HOSHIVAR SERVER STOPPED"
-        )
+        logger.info("Hoshiwar server stopped")
