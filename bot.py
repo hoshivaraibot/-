@@ -28,7 +28,6 @@ GEMINI_MODEL = os.getenv(
     "gemini-3.8-flash"
 )
 
-# CLOUDFLARE
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
 
@@ -970,7 +969,6 @@ def chat(message):
         show_settings(chat_id)
         return
 
-    # IMAGE MODE
     if is_image_mode(key):
 
         clear_image_mode(key)
@@ -982,7 +980,6 @@ def chat(message):
 
         return
 
-    # NORMAL AI CHAT
     try:
         waiting = bot.send_message(
             chat_id,
@@ -1045,7 +1042,8 @@ def chat(message):
 
 class WebhookHandler(BaseHTTPRequestHandler):
 
-    def do_GET(self):
+    # FIX: Render health check HEAD request
+    def do_HEAD(self):
 
         if self.path in ("/", "/health"):
 
@@ -1056,11 +1054,34 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "text/plain; charset=utf-8"
             )
 
+            self.send_header("Content-Length", "0")
+
             self.end_headers()
 
-            self.wfile.write(
-                b"Hoshiwar AI Bot is running"
+        else:
+            self.send_error(404)
+
+    def do_GET(self):
+
+        if self.path in ("/", "/health"):
+
+            body = b"Hoshiwar AI Bot is running"
+
+            self.send_response(200)
+
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
             )
+
+            self.send_header(
+                "Content-Length",
+                str(len(body))
+            )
+
+            self.end_headers()
+
+            self.wfile.write(body)
 
         else:
             self.send_error(404)
