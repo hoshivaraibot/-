@@ -34,6 +34,7 @@ WEBHOOK_PATH = "/telegram-webhook"
 MAX_WAIT = 45
 MAX_HISTORY = 10
 MAX_MESSAGE_LENGTH = 3900
+MAX_CACHED_CHATS = 5000  # جلوگیری از رشد بی‌رویه حافظه رم
 
 for name, value in [
     ("BOT_TOKEN", BOT_TOKEN),
@@ -67,6 +68,12 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("HOSHIVAR")
+
+# =====================================================
+# HTTP SESSION (OPTIMIZED FOR PERFORMANCE)
+# =====================================================
+
+http_session = requests.Session()
 
 # =====================================================
 # TELEGRAM
@@ -113,76 +120,30 @@ def main_keyboard():
         row_width=2,
         is_persistent=True
     )
-
-    keyboard.row(
-        KeyboardButton(BTN_CHAT),
-        KeyboardButton(BTN_IMAGE)
-    )
-
-    keyboard.row(
-        KeyboardButton(BTN_ACCOUNT),
-        KeyboardButton(BTN_HELP)
-    )
-
-    keyboard.row(
-        KeyboardButton(BTN_SETTINGS)
-    )
-
+    keyboard.row(KeyboardButton(BTN_CHAT), KeyboardButton(BTN_IMAGE))
+    keyboard.row(KeyboardButton(BTN_ACCOUNT), KeyboardButton(BTN_HELP))
+    keyboard.row(KeyboardButton(BTN_SETTINGS))
     return keyboard
 
 
 def main_inline_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=2)
-
+    keyboard.row(InlineKeyboardButton("💬 شروع گفتگو", callback_data="new_chat"))
     keyboard.row(
-        InlineKeyboardButton(
-            "💬 شروع گفتگو",
-            callback_data="new_chat"
-        )
+        InlineKeyboardButton("🎨 ساخت تصویر", callback_data="image"),
+        InlineKeyboardButton("👤 حساب کاربری", callback_data="account")
     )
-
     keyboard.row(
-        InlineKeyboardButton(
-            "🎨 ساخت تصویر",
-            callback_data="image"
-        ),
-        InlineKeyboardButton(
-            "👤 حساب کاربری",
-            callback_data="account"
-        )
+        InlineKeyboardButton("ℹ️ راهنما", callback_data="help"),
+        InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")
     )
-
-    keyboard.row(
-        InlineKeyboardButton(
-            "ℹ️ راهنما",
-            callback_data="help"
-        ),
-        InlineKeyboardButton(
-            "⚙️ تنظیمات",
-            callback_data="settings"
-        )
-    )
-
     return keyboard
 
 
 def settings_keyboard():
     keyboard = InlineKeyboardMarkup()
-
-    keyboard.add(
-        InlineKeyboardButton(
-            "🧹 پاک کردن حافظه گفتگو",
-            callback_data="reset_memory"
-        )
-    )
-
-    keyboard.add(
-        InlineKeyboardButton(
-            "🔙 بازگشت به منوی اصلی",
-            callback_data="home"
-        )
-    )
-
+    keyboard.add(InlineKeyboardButton("🧹 پاک کردن حافظه گفتگو", callback_data="reset_memory"))
+    keyboard.add(InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="home"))
     return keyboard
 
 
@@ -195,7 +156,6 @@ def send_home(chat_id):
         "هر سؤالی داری بپرس؛ با هم بهترین جواب رو پیدا می‌کنیم. ✨",
         reply_markup=main_keyboard()
     )
-
     bot.send_message(
         chat_id,
         "از دکمه‌های شیشه‌ای زیر هم می‌تونی استفاده کنی:",
@@ -204,7 +164,7 @@ def send_home(chat_id):
 
 
 # =====================================================
-# CHAT MEMORY
+# CHAT MEMORY (OPTIMIZED WITH SIZE LIMIT)
 # =====================================================
 
 chat_memory = {}
@@ -218,7 +178,6 @@ def get_chat_lock(key):
     with chat_locks_lock:
         if key not in chat_locks:
             chat_locks[key] = threading.Lock()
-
         return chat_locks[key]
 
 
@@ -229,18 +188,15 @@ def get_history(key):
 
 def save_history(key, user_message, ai_answer):
     with memory_lock:
+        # مدیریت سایز حافظه برای جلوگیری از افزایش بی‌رویه رم
+        if len(chat_memory) > MAX_CACHED_CHATS and key not in chat_memory:
+            # حذف قدیمی‌ترین چت اضافه شده
+            oldest_key = next(iter(chat_memory))
+            chat_memory.pop(oldest_key, None)
+
         history = chat_memory.get(key, [])
-
-        history.append({
-            "role": "user",
-            "parts": [{"text": user_message}]
-        })
-
-        history.append({
-            "role": "model",
-            "parts": [{"text": ai_answer}]
-        })
-
+        history.append({"role": "user", "parts": [{"text": user_message}]})
+        history.append({"role": "model", "parts": [{"text": ai_answer}]})
         chat_memory[key] = history[-MAX_HISTORY * 2:]
 
 
@@ -259,13 +215,10 @@ class DeadlineExceeded(Exception):
 
 def request_timeout(deadline):
     remaining = deadline - time.monotonic()
-
     if remaining <= 1:
         raise DeadlineExceeded("45 second deadline exceeded")
-
     connect_timeout = min(4.0, remaining / 4)
     read_timeout = max(1.0, remaining - connect_timeout - 0.5)
-
     return (connect_timeout, read_timeout)
 
 
@@ -279,12 +232,10 @@ def check_deadline(deadline):
 # =====================================================
 
 class ProviderAPIError(Exception):
-
     def __init__(self, provider, status, detail):
         self.provider = provider
         self.status = status
         self.detail = detail
-
         super().__init__(f"{provider} HTTP {status}: {detail}")
 
 
@@ -298,54 +249,35 @@ def get_retry_delay(detail):
         detail,
         re.IGNORECASE
     )
-
     if not match:
         return 60
 
     hours = int(match.group(1) or 0)
     minutes = int(match.group(2) or 0)
     seconds = float(match.group(3) or 0)
-
-    return max(
-        60,
-        int(hours * 3600 + minutes * 60 + seconds)
-    )
+    return max(60, int(hours * 3600 + minutes * 60 + seconds))
 
 
 def activate_gemini_cooldown(detail):
     global gemini_blocked_until
-
     delay = get_retry_delay(detail)
-
     with quota_lock:
-        gemini_blocked_until = max(
-            gemini_blocked_until,
-            time.time() + delay
-        )
-
+        gemini_blocked_until = max(gemini_blocked_until, time.time() + delay)
     logger.warning("Gemini cooldown: %s seconds", delay)
 
 
 def gemini_cooldown_remaining():
     with quota_lock:
-        return max(
-            0,
-            int(gemini_blocked_until - time.time())
-        )
+        return max(0, int(gemini_blocked_until - time.time()))
 
 
 def extract_error_detail(response):
     try:
         data = response.json()
         error = data.get("error", {})
-
         if isinstance(error, dict):
-            return str(
-                error.get("message") or response.text[:1500]
-            )
-
+            return str(error.get("message") or response.text[:1500])
         return response.text[:1500]
-
     except (ValueError, AttributeError):
         return response.text[:1500]
 
@@ -355,15 +287,9 @@ def extract_error_detail(response):
 # =====================================================
 
 def ask_gemini(message, memory_key, deadline):
-
     remaining = gemini_cooldown_remaining()
-
     if remaining > 0:
-        raise ProviderAPIError(
-            "primary",
-            429,
-            f"Quota cooldown: {remaining} seconds"
-        )
+        raise ProviderAPIError("primary", 429, f"Quota cooldown: {remaining} seconds")
 
     headers = {
         "Content-Type": "application/json",
@@ -376,17 +302,12 @@ def ask_gemini(message, memory_key, deadline):
     }]
 
     payload = {
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": contents,
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 2048
-        }
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048}
     }
 
-    response = requests.post(
+    response = http_session.post(
         GEMINI_URL,
         headers=headers,
         json=payload,
@@ -398,42 +319,23 @@ def ask_gemini(message, memory_key, deadline):
     if response.status_code == 429:
         detail = extract_error_detail(response)
         activate_gemini_cooldown(detail)
-
-        raise ProviderAPIError(
-            "primary",
-            429,
-            detail
-        )
+        raise ProviderAPIError("primary", 429, detail)
 
     if not response.ok:
-        raise ProviderAPIError(
-            "primary",
-            response.status_code,
-            extract_error_detail(response)
-        )
+        raise ProviderAPIError("primary", response.status_code, extract_error_detail(response))
 
     result = response.json()
-
     candidates = result.get("candidates", [])
-
     if not candidates:
         raise RuntimeError("Gemini returned no candidates")
 
-    parts = candidates[0].get(
-        "content", {}
-    ).get("parts", [])
-
-    answer = "".join(
-        part.get("text", "")
-        for part in parts
-        if isinstance(part, dict)
-    ).strip()
+    parts = candidates[0].get("content", {}).get("parts", [])
+    answer = "".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
 
     if not answer:
         raise RuntimeError("Gemini returned empty text")
 
     logger.info("Primary response received")
-
     return answer
 
 
@@ -442,41 +344,22 @@ def ask_gemini(message, memory_key, deadline):
 # =====================================================
 
 def ask_grok(message, memory_key, deadline):
-
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    grok_input = [{
-        "role": "system",
-        "content": SYSTEM_PROMPT
-    }]
+    grok_input = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     for item in get_history(memory_key):
-
-        role = (
-            "assistant"
-            if item.get("role") == "model"
-            else "user"
-        )
-
+        role = "assistant" if item.get("role") == "model" else "user"
         content = "".join(
-            part.get("text", "")
-            for part in item.get("parts", [])
-            if isinstance(part, dict)
+            part.get("text", "") for part in item.get("parts", []) if isinstance(part, dict)
         ).strip()
-
         if content:
-            grok_input.append({
-                "role": role,
-                "content": content
-            })
+            grok_input.append({"role": role, "content": content})
 
-    grok_input.append({
-        "role": "user",
-        "content": message
-    })
+    grok_input.append({"role": "user", "content": message})
 
     payload = {
         "model": GROK_MODEL,
@@ -487,7 +370,7 @@ def ask_grok(message, memory_key, deadline):
 
     logger.warning("Automatic backup activated")
 
-    response = requests.post(
+    response = http_session.post(
         GROK_URL,
         headers=headers,
         json=payload,
@@ -497,33 +380,23 @@ def ask_grok(message, memory_key, deadline):
     check_deadline(deadline)
 
     if not response.ok:
-        raise ProviderAPIError(
-            "backup",
-            response.status_code,
-            extract_error_detail(response)
-        )
+        raise ProviderAPIError("backup", response.status_code, extract_error_detail(response))
 
     result = response.json()
-
     answer_parts = []
 
     for item in result.get("output", []):
-
         if item.get("type") != "message":
             continue
-
         for part in item.get("content", []):
-
             if part.get("type") == "output_text":
                 answer_parts.append(part.get("text", ""))
 
     answer = "".join(answer_parts).strip()
-
     if not answer:
         raise RuntimeError("Grok returned empty text")
 
     logger.info("Backup response received")
-
     return answer
 
 
@@ -532,38 +405,17 @@ def ask_grok(message, memory_key, deadline):
 # =====================================================
 
 def ask_ai(message, memory_key, deadline):
-
     try:
-        answer = ask_gemini(
-            message,
-            memory_key,
-            deadline
-        )
-
+        answer = ask_gemini(message, memory_key, deadline)
     except DeadlineExceeded:
         raise
-
     except Exception:
-        logger.exception(
-            "Primary engine failed; trying automatic backup"
-        )
-
+        logger.exception("Primary engine failed; trying automatic backup")
         check_deadline(deadline)
-
-        answer = ask_grok(
-            message,
-            memory_key,
-            deadline
-        )
+        answer = ask_grok(message, memory_key, deadline)
 
     check_deadline(deadline)
-
-    save_history(
-        memory_key,
-        message,
-        answer
-    )
-
+    save_history(memory_key, message, answer)
     return answer
 
 
@@ -573,10 +425,7 @@ def ask_ai(message, memory_key, deadline):
 
 def send_long_message(chat_id, text):
     for start in range(0, len(text), MAX_MESSAGE_LENGTH):
-        bot.send_message(
-            chat_id,
-            text[start:start + MAX_MESSAGE_LENGTH]
-        )
+        bot.send_message(chat_id, text[start:start + MAX_MESSAGE_LENGTH])
 
 
 def send_generic_error(chat_id):
@@ -646,7 +495,6 @@ def help_command(message):
 @bot.message_handler(commands=["reset"])
 def reset_command(message):
     clear_history(str(message.chat.id))
-
     bot.send_message(
         message.chat.id,
         "🔄 حافظه این گفتگو پاک شد. ❤️",
@@ -660,10 +508,8 @@ def reset_command(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-
     try:
         bot.answer_callback_query(call.id)
-
         chat_id = call.message.chat.id
         key = str(chat_id)
         action = call.data
@@ -671,15 +517,11 @@ def callback_handler(call):
         if action in ("home", "new_chat"):
             if action == "new_chat":
                 clear_history(key)
-
             send_home(chat_id)
-
         elif action == "help":
             show_help(chat_id)
-
         elif action == "settings":
             show_settings(chat_id)
-
         elif action == "account":
             bot.send_message(
                 chat_id,
@@ -687,25 +529,17 @@ def callback_handler(call):
                 f"نام: {call.from_user.first_name or 'کاربر'}",
                 reply_markup=main_keyboard()
             )
-
         elif action == "image":
             show_image_notice(chat_id)
-
         elif action == "reset_memory":
             clear_history(key)
-
             bot.send_message(
                 chat_id,
                 "🧹 حافظه گفتگو با موفقیت پاک شد. ❤️",
                 reply_markup=main_keyboard()
             )
-
         else:
-            bot.answer_callback_query(
-                call.id,
-                "این گزینه در دسترس نیست."
-            )
-
+            bot.answer_callback_query(call.id, "این گزینه در دسترس نیست.")
     except Exception:
         logger.exception("Callback handler error")
 
@@ -716,7 +550,6 @@ def callback_handler(call):
 
 @bot.message_handler(content_types=["text"])
 def chat(message):
-
     chat_id = message.chat.id
     key = str(chat_id)
     user_text = (message.text or "").strip()
@@ -724,11 +557,8 @@ def chat(message):
     if not user_text:
         return
 
-    # Main keyboard actions
-
     if user_text == BTN_CHAT:
         clear_history(key)
-
         bot.send_message(
             chat_id,
             "💬 گفتگوی تازه شروع شد!\n"
@@ -753,14 +583,8 @@ def chat(message):
         show_settings(chat_id)
         return
 
-    # Normal AI conversation
-
     try:
-        waiting = bot.send_message(
-            chat_id,
-            "⏳ هشیوار داره فکر می‌کنه..."
-        )
-
+        waiting = bot.send_message(chat_id, "⏳ هشیوار داره فکر می‌کنه...")
     except Exception:
         logger.exception("Could not send waiting message")
         return
@@ -769,40 +593,24 @@ def chat(message):
 
     try:
         with get_chat_lock(key):
-
             check_deadline(deadline)
-
-            answer = ask_ai(
-                user_text,
-                key,
-                deadline
-            )
+            answer = ask_ai(user_text, key, deadline)
 
         check_deadline(deadline)
 
         try:
-            bot.delete_message(
-                chat_id,
-                waiting.message_id
-            )
+            bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
 
         send_long_message(chat_id, answer)
 
     except Exception:
-        logger.exception(
-            "AI request failed or exceeded response deadline"
-        )
-
+        logger.exception("AI request failed or exceeded response deadline")
         try:
-            bot.delete_message(
-                chat_id,
-                waiting.message_id
-            )
+            bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-
         send_generic_error(chat_id)
 
 
@@ -813,63 +621,39 @@ def chat(message):
 class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-
         if self.path in ("/", "/health"):
-
             self.send_response(200)
-
-            self.send_header(
-                "Content-Type",
-                "text/plain; charset=utf-8"
-            )
-
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-
-            self.wfile.write(
-                b"Hoshiwar AI Bot is running"
-            )
-
+            self.wfile.write(b"Hoshiwar AI Bot is running")
         else:
             self.send_error(404)
 
     def do_POST(self):
-
         if self.path != WEBHOOK_PATH:
             self.send_error(404)
             return
 
-        received_secret = self.headers.get(
-            "X-Telegram-Bot-Api-Secret-Token"
-        )
-
+        received_secret = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
         if received_secret != WEBHOOK_SECRET:
             logger.warning("Invalid webhook secret")
             self.send_error(403)
             return
 
         try:
-            content_length = int(
-                self.headers.get("Content-Length", "0")
-            )
-
+            content_length = int(self.headers.get("Content-Length", "0"))
             if content_length <= 0 or content_length > 1_000_000:
                 self.send_error(400)
                 return
 
             raw_data = self.rfile.read(content_length)
-
-            update = telebot.types.Update.de_json(
-                raw_data.decode("utf-8")
-            )
-
-            # TeleBot processes updates using its worker pool.
-            # The webhook can acknowledge without waiting for AI.
+            update = telebot.types.Update.de_json(raw_data.decode("utf-8"))
+            
             bot.process_new_updates([update])
 
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-
         except Exception:
             logger.exception("Webhook processing error")
             self.send_error(500)
@@ -883,23 +667,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
 # =====================================================
 
 if __name__ == "__main__":
-
     logger.info("================================")
-    logger.info("STARTING HOSHIVAR AI")
+    logger.info("STARTING HOSHIVAR AI (OPTIMized)")
     logger.info("Primary engine: %s", GEMINI_MODEL)
     logger.info("Backup engine: %s", GROK_MODEL)
     logger.info("Maximum AI response time: %s seconds", MAX_WAIT)
     logger.info("================================")
 
-    server = ThreadingHTTPServer(
-        ("0.0.0.0", PORT),
-        WebhookHandler
-    )
-
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), WebhookHandler)
     server.daemon_threads = True
 
     try:
-
         webhook_result = bot.set_webhook(
             url=WEBHOOK_URL,
             secret_token=WEBHOOK_SECRET,
@@ -907,9 +685,7 @@ if __name__ == "__main__":
         )
 
         if not webhook_result:
-            raise RuntimeError(
-                "Telegram webhook setup failed"
-            )
+            raise RuntimeError("Telegram webhook setup failed")
 
         logger.info("Webhook configured successfully")
         logger.info("Hoshiwar is live")
@@ -919,7 +695,6 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Application startup error")
         raise
-
     finally:
         server.server_close()
         logger.info("Hoshiwar server stopped")
