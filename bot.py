@@ -13,7 +13,7 @@ from telebot.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
 )
 
 # =====================================================
@@ -22,18 +22,14 @@ from telebot.types import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# اگر GEMINI_MODEL در Render تعریف شده باشد، همان مقدار استفاده می‌شود.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
-
 CLOUDFLARE_TEXT_MODEL = os.getenv(
     "CLOUDFLARE_TEXT_MODEL",
     "@cf/meta/llama-3.1-8b-instruct-fast"
 )
-
 CLOUDFLARE_IMAGE_MODEL = os.getenv(
     "CLOUDFLARE_IMAGE_MODEL",
     "@cf/black-forest-labs/flux-1-schnell"
@@ -42,20 +38,26 @@ CLOUDFLARE_IMAGE_MODEL = os.getenv(
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-
 WEBHOOK_PATH = "/telegram-webhook"
 
-MAX_WAIT = 45
+MAX_WAIT = 60
 IMAGE_WAIT = 90
 MAX_HISTORY = 10
 MAX_MESSAGE_LENGTH = 3900
 MAX_CACHED_CHATS = 5000
 
+# Set ADMIN_IDS in Render, e.g. 123456789,987654321
+ADMIN_IDS = {
+    int(item.strip())
+    for item in os.getenv("ADMIN_IDS", "").split(",")
+    if item.strip().isdigit()
+}
+
 for name, value in [
     ("BOT_TOKEN", BOT_TOKEN),
     ("GEMINI_API_KEY", GEMINI_API_KEY),
     ("WEBHOOK_SECRET", WEBHOOK_SECRET),
-    ("RENDER_EXTERNAL_URL", RENDER_URL)
+    ("RENDER_EXTERNAL_URL", RENDER_URL),
 ]:
     if not value:
         raise ValueError(f"{name} is missing")
@@ -69,19 +71,17 @@ if bool(CLOUDFLARE_ACCOUNT_ID) != bool(CLOUDFLARE_API_TOKEN):
     )
 
 WEBHOOK_URL = RENDER_URL.rstrip("/") + WEBHOOK_PATH
-
 GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/"
-    f"models/{GEMINI_MODEL}:generateContent"
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
 )
-
 CLOUDFLARE_BASE_URL = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_ACCOUNT_ID}/ai/run"
 ) if CLOUDFLARE_ACCOUNT_ID else None
 
 # =====================================================
-# LOGGING
+# LOGGING / HTTP / TELEGRAM
 # =====================================================
 
 logging.basicConfig(
@@ -89,10 +89,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger("HOSHIVAR")
-
-# =====================================================
-# HTTP SESSION / TELEGRAM
-# =====================================================
 
 http_session = requests.Session()
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -105,65 +101,70 @@ SYSTEM_PROMPT = """
 تو هشیوار هستی؛ یک دستیار هوش مصنوعی فارسی‌زبان، زرنگ، سریع،
 باهوش، دقیق، صمیمی و حرفه‌ای.
 
-ویژگی‌های رفتاری:
-- منظور کاربر را با دقت تشخیص بده و مستقیم سر اصل مطلب برو.
-- پاسخ‌ها را تا حد ممکن سریع، دقیق، کاربردی و منظم ارائه کن.
+- منظور کاربر را دقیق تشخیص بده و مستقیم پاسخ بده.
 - فارسی را روان، طبیعی و درست بنویس؛ مگر اینکه کاربر زبان دیگری بخواهد.
-- لحن تو دوستانه و محترمانه است؛ نه خشک و ماشینی و نه بیش از حد خودمانی.
+- پاسخ‌ها کاربردی، روشن و متناسب با درخواست کاربر باشند.
 - در صورت نیاز توضیحات مرحله‌به‌مرحله بده.
-- در برنامه‌نویسی کد صحیح، کامل و قابل اجرا ارائه کن.
+- در برنامه‌نویسی کد صحیح و قابل اجرا ارائه کن.
 - اگر چیزی را نمی‌دانی یا مطمئن نیستی، صادقانه بگو و اطلاعات جعلی نساز.
 - از ایموجی به اندازه استفاده کن.
 - خودت را هشیوار معرفی کن.
 - نام مدل‌ها و سرویس‌های پشتیبان را مطرح نکن.
-- بی‌دلیل عذرخواهی نکن و پاسخ را با جملات تکراری طولانی نکن.
-- از قلب آبی 💙 و نماد برق ⚡ در موقعیت‌های مناسب استفاده کن.
+- بی‌دلیل عذرخواهی نکن و پاسخ تکراری نده.
+- از قلب آبی 💙 و سبز 💚 و نماد برق ⚡ در موقعیت مناسب استفاده کن.
 """
 
 # =====================================================
-# MENU BUTTONS
+# MENU
 # =====================================================
 
 BTN_CHAT = "💬 گفتگوی جدید"
 BTN_IMAGE = "🎨 ساخت تصویر"
+BTN_TRANSLATE = "🌐 ترجمه انگلیسی به فارسی"
 BTN_WORD = "📚 معنی کلمات"
 BTN_PROVERB = "🪶 ضرب‌المثل‌یاب"
 BTN_ACCOUNT = "👤 حساب کاربری"
+BTN_STATS = "📊 آمار ربات"
+BTN_INVITE = "👥 دعوت دوستان"
 BTN_HELP = "ℹ️ راهنما"
 BTN_SETTINGS = "⚙️ تنظیمات"
 
+
 def main_keyboard():
     keyboard = ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        row_width=2,
-        is_persistent=True
+        resize_keyboard=True, row_width=2, is_persistent=True
     )
     keyboard.row(KeyboardButton(BTN_CHAT), KeyboardButton(BTN_IMAGE))
-    keyboard.row(KeyboardButton(BTN_WORD), KeyboardButton(BTN_PROVERB))
-    keyboard.row(KeyboardButton(BTN_ACCOUNT), KeyboardButton(BTN_HELP))
-    keyboard.row(KeyboardButton(BTN_SETTINGS))
+    keyboard.row(KeyboardButton(BTN_TRANSLATE), KeyboardButton(BTN_WORD))
+    keyboard.row(KeyboardButton(BTN_PROVERB), KeyboardButton(BTN_ACCOUNT))
+    keyboard.row(KeyboardButton(BTN_STATS), KeyboardButton(BTN_INVITE))
+    keyboard.row(KeyboardButton(BTN_SETTINGS), KeyboardButton(BTN_HELP))
     return keyboard
 
 
 def main_inline_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=2)
-
     keyboard.row(
         InlineKeyboardButton("💬 شروع گفتگو", callback_data="new_chat")
     )
     keyboard.row(
         InlineKeyboardButton("🎨 ساخت تصویر", callback_data="image"),
-        InlineKeyboardButton("📚 معنی کلمات", callback_data="word")
+        InlineKeyboardButton("🌐 ترجمه", callback_data="translate")
     )
     keyboard.row(
-        InlineKeyboardButton("🪶 ضرب‌المثل‌یاب", callback_data="proverb"),
-        InlineKeyboardButton("👤 حساب کاربری", callback_data="account")
+        InlineKeyboardButton("📚 معنی کلمات", callback_data="word"),
+        InlineKeyboardButton("🪶 ضرب‌المثل‌یاب", callback_data="proverb")
     )
     keyboard.row(
-        InlineKeyboardButton("ℹ️ راهنما", callback_data="help"),
+        InlineKeyboardButton("👤 حساب کاربری", callback_data="account"),
+        InlineKeyboardButton("👥 دعوت دوستان", callback_data="invite")
+    )
+    keyboard.row(
+        InlineKeyboardButton("📊 آمار ربات", callback_data="stats"),
         InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")
     )
     keyboard.row(
+        InlineKeyboardButton("ℹ️ راهنما", callback_data="help"),
         InlineKeyboardButton("💙 درباره هشیوار", callback_data="about")
     )
     return keyboard
@@ -173,14 +174,12 @@ def settings_keyboard():
     keyboard = InlineKeyboardMarkup()
     keyboard.add(
         InlineKeyboardButton(
-            "🧹 پاک کردن حافظه گفتگو",
-            callback_data="reset_memory"
+            "🧹 پاک کردن حافظه گفتگو", callback_data="reset_memory"
         )
     )
     keyboard.add(
         InlineKeyboardButton(
-            "🔙 بازگشت به منوی اصلی",
-            callback_data="home"
+            "🔙 بازگشت به منوی اصلی", callback_data="home"
         )
     )
     return keyboard
@@ -190,7 +189,7 @@ def send_home(chat_id):
     bot.send_message(
         chat_id,
         "سلام دوست من! 👋\n\n"
-        "به هشیوار خوش اومدی؛ دستیار هوشمند، زرنگ و سریع تو. 💙\n\n"
+        "به هشیوار خوش اومدی؛ دستیار هوشمند، زرنگ و سریع تو. 💙💚\n\n"
         "هر سؤالی داری بپرس یا از قابلیت‌های منو استفاده کن. ⚡",
         reply_markup=main_keyboard()
     )
@@ -202,18 +201,18 @@ def send_home(chat_id):
 
 
 # =====================================================
-# CHAT MEMORY AND USER MODES
+# CHAT MEMORY AND MODES
 # =====================================================
 
 chat_memory = {}
 memory_lock = threading.Lock()
-
 chat_locks = {}
 chat_locks_lock = threading.Lock()
 
 awaiting_images = set()
 awaiting_words = set()
 awaiting_proverbs = set()
+awaiting_translations = set()
 image_state_lock = threading.Lock()
 
 
@@ -236,14 +235,10 @@ def save_history(key, user_message, ai_answer):
             chat_memory.pop(oldest_key, None)
 
         history = chat_memory.get(key, [])
-        history.append({
-            "role": "user",
-            "parts": [{"text": user_message}]
-        })
-        history.append({
-            "role": "model",
-            "parts": [{"text": ai_answer}]
-        })
+        history.extend([
+            {"role": "user", "parts": [{"text": user_message}]},
+            {"role": "model", "parts": [{"text": ai_answer}]},
+        ])
         chat_memory[key] = history[-MAX_HISTORY * 2:]
 
 
@@ -257,6 +252,7 @@ def clear_all_modes(key):
         awaiting_images.discard(key)
         awaiting_words.discard(key)
         awaiting_proverbs.discard(key)
+        awaiting_translations.discard(key)
 
 
 def set_mode(mode_set, key):
@@ -264,6 +260,7 @@ def set_mode(mode_set, key):
         awaiting_images.discard(key)
         awaiting_words.discard(key)
         awaiting_proverbs.discard(key)
+        awaiting_translations.discard(key)
         mode_set.add(key)
 
 
@@ -278,7 +275,107 @@ def clear_mode(mode_set, key):
 
 
 # =====================================================
-# RESPONSE DEADLINE
+# USER STATISTICS AND REFERRALS (IN-MEMORY)
+# =====================================================
+
+users_data = {}
+users_lock = threading.Lock()
+
+
+def register_user(user, referral_id=None):
+    user_id = user.id
+
+    with users_lock:
+        if user_id in users_data:
+            users_data[user_id]["last_seen"] = time.time()
+            return False
+
+        users_data[user_id] = {
+            "first_name": user.first_name or "کاربر",
+            "username": user.username or "",
+            "first_seen": time.time(),
+            "last_seen": time.time(),
+            "referred_by": None,
+            "referrals": 0,
+        }
+
+        if (
+            referral_id
+            and referral_id != user_id
+            and referral_id in users_data
+        ):
+            users_data[user_id]["referred_by"] = referral_id
+            users_data[referral_id]["referrals"] += 1
+
+        return True
+
+
+def update_user_activity(user):
+    with users_lock:
+        if user.id in users_data:
+            users_data[user.id]["last_seen"] = time.time()
+
+
+def get_total_referrals():
+    with users_lock:
+        return sum(data["referrals"] for data in users_data.values())
+
+
+def show_invite(chat_id, user_id):
+    try:
+        username = bot.get_me().username
+        invite_link = f"https://t.me/{username}?start=ref_{user_id}"
+
+        with users_lock:
+            referrals = users_data.get(user_id, {}).get("referrals", 0)
+
+        bot.send_message(
+            chat_id,
+            "👥 دعوت دوستان به هشیوار\n\n"
+            "با لینک اختصاصی خودت دوستانت رو به هشیوار دعوت کن.\n\n"
+            f"🔗 لینک دعوت تو:\n{invite_link}\n\n"
+            f"🎁 دعوت‌های موفق: {referrals}\n\n"
+            "دعوت زمانی ثبت می‌شه که یک کاربر جدید برای اولین بار "
+            "از طریق لینک تو وارد ربات بشه. 💙💚",
+            reply_markup=main_keyboard()
+        )
+    except Exception:
+        logger.exception("Invite link error")
+        send_generic_error(chat_id)
+
+
+def show_stats(chat_id, user_id):
+    with users_lock:
+        total = len(users_data)
+        referrals = users_data.get(user_id, {}).get("referrals", 0)
+        last_24_hours = time.time() - 86400
+        new_users = sum(
+            1 for data in users_data.values()
+            if data["first_seen"] >= last_24_hours
+        )
+
+    if user_id in ADMIN_IDS:
+        bot.send_message(
+            chat_id,
+            "📊 آمار مدیریتی هشیوار\n\n"
+            f"👥 کل کاربران ثبت‌شده: {total}\n"
+            f"🆕 کاربران ۲۴ ساعت اخیر: {new_users}\n"
+            f"🤝 مجموع دعوت‌های موفق: {get_total_referrals()}\n\n"
+            "⚠️ این آمار فعلاً موقتی است و با راه‌اندازی مجدد برنامه پاک می‌شود.",
+            reply_markup=main_keyboard()
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            "📊 آمار حساب تو\n\n"
+            f"🎁 دعوت‌های موفق تو: {referrals}\n\n"
+            "آمار کلی فقط برای مدیر ربات نمایش داده می‌شود. 💙",
+            reply_markup=main_keyboard()
+        )
+
+
+# =====================================================
+# DEADLINES / PROVIDER ERRORS
 # =====================================================
 
 class DeadlineExceeded(Exception):
@@ -297,10 +394,9 @@ def request_timeout(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 1:
         raise DeadlineExceeded("Response deadline exceeded")
-
     connect_timeout = min(4.0, remaining / 4)
     read_timeout = max(1.0, remaining - connect_timeout - 0.5)
-    return (connect_timeout, read_timeout)
+    return connect_timeout, read_timeout
 
 
 def check_deadline(deadline):
@@ -324,7 +420,6 @@ def get_retry_delay(detail):
     )
     if not match:
         return 60
-
     hours = int(match.group(1) or 0)
     minutes = int(match.group(2) or 0)
     seconds = float(match.group(3) or 0)
@@ -334,11 +429,9 @@ def get_retry_delay(detail):
 def activate_gemini_cooldown(detail):
     global gemini_blocked_until
     delay = get_retry_delay(detail)
-
     with quota_lock:
         gemini_blocked_until = max(
-            gemini_blocked_until,
-            time.time() + delay
+            gemini_blocked_until, time.time() + delay
         )
     logger.warning("Gemini cooldown: %s seconds", delay)
 
@@ -360,7 +453,7 @@ def extract_error_detail(response):
 
 
 # =====================================================
-# GEMINI - PRIMARY TEXT ENGINE
+# GEMINI PRIMARY TEXT ENGINE
 # =====================================================
 
 def ask_gemini(message, memory_key, deadline):
@@ -372,30 +465,26 @@ def ask_gemini(message, memory_key, deadline):
 
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
+        "x-goog-api-key": GEMINI_API_KEY,
     }
-
     contents = get_history(memory_key) + [{
         "role": "user",
-        "parts": [{"text": message}]
+        "parts": [{"text": message}],
     }]
-
     payload = {
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": contents,
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 2048
-        }
+            "maxOutputTokens": 2048,
+        },
     }
 
     response = http_session.post(
         GEMINI_URL,
         headers=headers,
         json=payload,
-        timeout=request_timeout(deadline)
+        timeout=request_timeout(deadline),
     )
     check_deadline(deadline)
 
@@ -429,7 +518,7 @@ def ask_gemini(message, memory_key, deadline):
 
 
 # =====================================================
-# CLOUDFLARE - BACKUP TEXT ENGINE
+# CLOUDFLARE TEXT ENGINE
 # =====================================================
 
 def cloudflare_request(model, payload, deadline):
@@ -439,14 +528,14 @@ def cloudflare_request(model, payload, deadline):
     url = f"{CLOUDFLARE_BASE_URL}/{model}"
     headers = {
         "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
     response = http_session.post(
         url,
         headers=headers,
         json=payload,
-        timeout=request_timeout(deadline)
+        timeout=request_timeout(deadline),
     )
     check_deadline(deadline)
 
@@ -466,22 +555,27 @@ def cloudflare_request(model, payload, deadline):
     return result.get("result", result)
 
 
+def extract_cloudflare_text(result):
+    answer = result.get("response", "")
+    if not answer and isinstance(result.get("choices"), list):
+        choices = result["choices"]
+        if choices:
+            answer = choices[0].get("message", {}).get("content", "")
+    return answer.strip() if isinstance(answer, str) else ""
+
+
 def ask_cloudflare(message, memory_key, deadline):
-    history = get_history(memory_key)
-    messages = [{
-        "role": "system",
-        "content": SYSTEM_PROMPT
-    }]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    for item in history:
+    for item in get_history(memory_key):
         role = item.get("role")
-        if role == "user":
-            target_role = "user"
-        elif role == "model":
-            target_role = "assistant"
-        else:
+        target_role = (
+            "user" if role == "user"
+            else "assistant" if role == "model"
+            else None
+        )
+        if not target_role:
             continue
-
         content = "".join(
             part.get("text", "")
             for part in item.get("parts", [])
@@ -491,41 +585,25 @@ def ask_cloudflare(message, memory_key, deadline):
             messages.append({"role": target_role, "content": content})
 
     messages.append({"role": "user", "content": message})
-    payload = {
-        "messages": messages,
-        "max_tokens": 2048,
-        "temperature": 0.7
-    }
-
-    result = cloudflare_request(CLOUDFLARE_TEXT_MODEL, payload, deadline)
-    answer = result.get("response", "")
-
-    if not answer and isinstance(result.get("choices"), list):
-        choices = result["choices"]
-        if choices:
-            answer = (
-                choices[0].get("message", {}).get("content", "")
-            )
-
-    if not isinstance(answer, str) or not answer.strip():
+    result = cloudflare_request(
+        CLOUDFLARE_TEXT_MODEL,
+        {"messages": messages, "max_tokens": 2048, "temperature": 0.7},
+        deadline,
+    )
+    answer = extract_cloudflare_text(result)
+    if not answer:
         raise RuntimeError("Cloudflare returned empty text")
 
     logger.info("Cloudflare backup response received")
-    return answer.strip()
+    return answer
 
-
-# =====================================================
-# AI ENGINE - GEMINI + CLOUDFLARE
-# =====================================================
 
 def ask_ai(message, memory_key, deadline):
     try:
         answer = ask_gemini(message, memory_key, deadline)
         logger.info("AI provider: Gemini")
     except Exception as gemini_error:
-        logger.warning(
-            "Gemini failed; switching to Cloudflare: %s", gemini_error
-        )
+        logger.warning("Gemini failed; switching to Cloudflare: %s", gemini_error)
         check_deadline(deadline)
         answer = ask_cloudflare(message, memory_key, deadline)
         logger.info("AI provider: Cloudflare")
@@ -536,70 +614,58 @@ def ask_ai(message, memory_key, deadline):
 
 
 # =====================================================
-# IMAGE PROMPT TRANSLATION + IMAGE GENERATION
+# CLOUDFLARE IMAGE PROMPT TRANSLATION
 # =====================================================
 
 def translate_image_prompt(prompt, deadline):
-    """
-    ترجمه پنهانی توضیح فارسی تصویر به پرامپت انگلیسی مناسب مدل تصویرساز.
-    """
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        raise RuntimeError("Cloudflare text service is not configured")
-
     messages = [
         {
             "role": "system",
             "content": (
-                "You translate image-generation requests into concise, "
-                "high-quality English prompts. Preserve the user's exact "
-                "meaning, subjects, setting, composition, style and details. "
-                "Return only the English image prompt. Do not add commentary."
-            )
+                "You are an expert prompt translator for image generation. "
+                "Translate the user's complete request into a detailed, "
+                "natural English image prompt. Preserve every instruction "
+                "and detail: subjects, number of people or objects, identity "
+                "preservation, age, gender, appearance, clothing, pose, "
+                "expression, setting, background, objects, colors, lighting, "
+                "camera angle, lens, framing, composition, visual style, "
+                "realism, quality and aspect ratio. Do not omit, summarize, "
+                "reinterpret, or invent details. Do not add unwanted elements. "
+                "If the user asks to keep a person's face or identity unchanged, "
+                "state that clearly in the English prompt. Return only the "
+                "English prompt, with no explanation."
+            ),
         },
-        {
-            "role": "user",
-            "content": prompt
-        }
+        {"role": "user", "content": prompt},
     ]
 
     result = cloudflare_request(
         CLOUDFLARE_TEXT_MODEL,
         {
             "messages": messages,
-            "max_tokens": 700,
-            "temperature": 0.2
+            "max_tokens": 1400,
+            "temperature": 0.1,
         },
-        deadline
+        deadline,
     )
+    translated = extract_cloudflare_text(result)
 
-    translated = result.get("response", "")
-    if not translated and isinstance(result.get("choices"), list):
-        choices = result["choices"]
-        if choices:
-            translated = (
-                choices[0].get("message", {}).get("content", "")
-            )
-
-    translated = translated.strip() if isinstance(translated, str) else ""
     if not translated:
         raise RuntimeError("Image prompt translation returned empty text")
 
+    logger.info("Image prompt translated through Cloudflare")
     return translated[:1800]
 
 
 def generate_image(prompt, deadline):
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        raise RuntimeError("Cloudflare image service is not configured")
-
     if len(prompt) > 1800:
         raise ValueError("Image prompt is too long")
 
     result = cloudflare_request(
         CLOUDFLARE_IMAGE_MODEL,
         {"prompt": prompt, "steps": 4},
-        deadline
+        deadline,
     )
-
     image_data = result.get("image")
     if not image_data:
         raise RuntimeError("Cloudflare returned no image")
@@ -620,9 +686,8 @@ def handle_image_request(chat_id, prompt):
     waiting = bot.send_message(
         chat_id,
         "🎨 هشیوار در حال آماده‌سازی تصویرته...\n"
-        "اول توضیحت رو برای تصویرساز آماده می‌کنم و بعد تصویر رو می‌سازم. ⚡"
+        "اول توضیحت رو کامل به انگلیسی تبدیل می‌کنم و بعد تصویر رو می‌سازم. ⚡"
     )
-
     deadline = time.monotonic() + IMAGE_WAIT
 
     try:
@@ -641,33 +706,70 @@ def handle_image_request(chat_id, prompt):
         bot.send_photo(
             chat_id,
             image_file,
-            caption="✨ تصویرت آماده شد!\nساخته‌شده با هشیوار 💙",
+            caption="✨ تصویرت آماده شد!\nساخته‌شده با هشیوار 💙💚",
             reply_markup=main_keyboard(),
-            timeout=30
+            timeout=30,
         )
-
     except Exception:
         logger.exception("Image generation failed")
         try:
             bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-
         bot.send_message(
             chat_id,
             "⚠️ متأسفانه ساخت تصویر انجام نشد.\n"
-            "لطفاً دوباره تلاش کن. اگر مشکل ادامه داشت، ممکنه سرویس تصویر موقتاً در دسترس نباشه. 💙",
-            reply_markup=main_keyboard()
+            "لطفاً دوباره تلاش کن. 💙",
+            reply_markup=main_keyboard(),
         )
 
 
 # =====================================================
-# TELEGRAM MESSAGE UTILITIES / INFORMATION PAGES
+# ENGLISH TO PERSIAN TRANSLATOR
+# =====================================================
+
+def translate_to_persian(text, deadline):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a professional English-to-Persian translator. "
+                "Translate the complete English text into fluent, natural, "
+                "accurate Persian (Farsi). Preserve the full meaning, tone, "
+                "names, numbers, formatting and every detail. Do not summarize, "
+                "omit, explain, or invent anything. Preserve paragraphs and "
+                "lists. Return only the Persian translation."
+            ),
+        },
+        {"role": "user", "content": text},
+    ]
+
+    result = cloudflare_request(
+        CLOUDFLARE_TEXT_MODEL,
+        {
+            "messages": messages,
+            "max_tokens": 2500,
+            "temperature": 0.1,
+        },
+        deadline,
+    )
+    translated = extract_cloudflare_text(result)
+    if not translated:
+        raise RuntimeError("Translation returned empty text")
+    return translated
+
+
+# =====================================================
+# TELEGRAM MESSAGE UTILITIES / PAGES
 # =====================================================
 
 def send_long_message(chat_id, text):
     for start in range(0, len(text), MAX_MESSAGE_LENGTH):
-        bot.send_message(chat_id, text[start:start + MAX_MESSAGE_LENGTH])
+        bot.send_message(
+            chat_id,
+            text[start:start + MAX_MESSAGE_LENGTH],
+            reply_markup=main_keyboard() if start + MAX_MESSAGE_LENGTH >= len(text) else None,
+        )
 
 
 def send_generic_error(chat_id):
@@ -675,7 +777,7 @@ def send_generic_error(chat_id):
         chat_id,
         "⚠️ هشیوار فعلاً نتونست پاسخ رو آماده کنه.\n"
         "لطفاً کمی بعد دوباره تلاش کن. 💙",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
 
 
@@ -683,14 +785,17 @@ def show_help(chat_id):
     bot.send_message(
         chat_id,
         "🤖 راهنمای هشیوار\n\n"
-        "💬 گفتگوی جدید: پرسیدن هر نوع سؤال\n"
-        "🎨 ساخت تصویر: توضیح تصویر را به فارسی بنویس\n"
-        "📚 معنی کلمات: واژه را بفرست تا معنی و کاربردش را بدانی\n"
-        "🪶 ضرب‌المثل‌یاب: موضوع را بنویس تا ضرب‌المثل‌های مرتبط پیشنهاد شوند\n"
-        "👤 حساب کاربری: مشاهده اطلاعات حساب\n"
+        "💬 گفتگوی جدید: گفت‌وگو با هوش مصنوعی\n"
+        "🎨 ساخت تصویر: ساخت تصویر با توضیح فارسی\n"
+        "🌐 ترجمه: ترجمه انگلیسی به فارسی\n"
+        "📚 معنی کلمات: معنی و کاربرد واژه‌ها\n"
+        "🪶 ضرب‌المثل‌یاب: پیشنهاد ضرب‌المثل مرتبط\n"
+        "👤 حساب کاربری: اطلاعات حساب\n"
+        "📊 آمار ربات: مشاهده آمار کاربران\n"
+        "👥 دعوت دوستان: دریافت لینک دعوت اختصاصی\n"
         "⚙️ تنظیمات: مدیریت حافظه گفتگو\n\n"
-        "برای شروع، یکی از دکمه‌های منو را انتخاب کن. 💙",
-        reply_markup=main_keyboard()
+        "هشیوار همیشه آماده کمک به توست! 💙💚",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -702,11 +807,12 @@ def show_about(chat_id):
         "زرنگ، سریع، دقیق و خوش‌برخورد.\n\n"
         "✨ گفت‌وگوی هوشمند\n"
         "🎨 ساخت تصویر با توضیح فارسی\n"
-        "📚 معنی واژه‌ها و آشنایی با زبان فارسی\n"
-        "🪶 پیدا کردن ضرب‌المثل بر اساس موضوع\n\n"
-        "شعار هشیوار:\n"
+        "🌐 ترجمه انگلیسی به فارسی\n"
+        "📚 معنی واژه‌ها\n"
+        "🪶 ضرب‌المثل‌یاب\n"
+        "👥 دعوت دوستان و آمار کاربران\n\n"
         "«باهوش، زرنگ و همیشه آماده!» ⚡",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
 
 
@@ -715,7 +821,7 @@ def show_settings(chat_id):
         chat_id,
         "⚙️ تنظیمات هشیوار\n\n"
         "از گزینه زیر برای مدیریت حافظه گفتگوی فعلی استفاده کن.",
-        reply_markup=settings_keyboard()
+        reply_markup=settings_keyboard(),
     )
 
 
@@ -725,8 +831,8 @@ def show_account(message):
         "👤 حساب کاربری\n\n"
         f"شناسه کاربری: {message.from_user.id}\n"
         f"نام: {message.from_user.first_name or 'کاربر'}\n\n"
-        "از همراهی تو با هشیوار خوشحالیم. 💙",
-        reply_markup=main_keyboard()
+        "از همراهی تو با هشیوار خوشحالیم. 💙💚",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -735,22 +841,40 @@ def show_image_notice(chat_id):
         bot.send_message(
             chat_id,
             "⚠️ سرویس ساخت تصویر هنوز تنظیم نشده است.",
-            reply_markup=main_keyboard()
+            reply_markup=main_keyboard(),
         )
         return
 
-    key = str(chat_id)
-    set_mode(awaiting_images, key)
-
+    set_mode(awaiting_images, str(chat_id))
     bot.send_message(
         chat_id,
         "🎨 به استودیوی تصویرسازی هشیوار خوش اومدی!\n\n"
         "توضیح تصویری که می‌خوای بسازم رو به فارسی بنویس.\n"
-        "من توضیحت رو آماده می‌کنم و تصویر رو می‌سازم.\n\n"
+        "من تمام جزئیات توضیحت رو به انگلیسی تبدیل می‌کنم و تصویر رو می‌سازم.\n\n"
         "مثال: یک منظره طبیعی از جنگل‌های شمال ایران در غروب، "
         "واقع‌گرایانه و با کیفیت بالا 🌅\n\n"
         "برای لغو، روی «گفتگوی جدید» بزن.",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
+    )
+
+
+def show_translate_notice(chat_id):
+    if not CLOUDFLARE_API_TOKEN or not CLOUDFLARE_ACCOUNT_ID:
+        bot.send_message(
+            chat_id,
+            "⚠️ سرویس ترجمه هنوز تنظیم نشده است.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    set_mode(awaiting_translations, str(chat_id))
+    bot.send_message(
+        chat_id,
+        "🌐 مترجم هشیوار آماده است!\n\n"
+        "متن انگلیسی خودت رو بفرست تا به فارسی روان ترجمه کنم.\n"
+        "ترجمه کامل و بدون خلاصه‌سازی انجام می‌شه. 💙💚\n\n"
+        "برای لغو، روی «گفتگوی جدید» بزن.",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -764,7 +888,7 @@ def show_word_notice(chat_id):
         "و یک مثال کاربردی رو برات توضیح می‌دم.\n\n"
         "مثال: «فرزانگی»\n\n"
         "برای لغو، «گفتگوی جدید» رو بزن. 💙",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
 
 
@@ -774,13 +898,10 @@ def show_proverb_notice(chat_id):
         chat_id,
         "🪶 به ضرب‌المثل‌یاب هشیوار خوش اومدی!\n\n"
         "فقط موضوع موردنظرت رو بنویس؛ مثلاً:\n"
-        "• رفاقت\n"
-        "• صبر و شکیبایی\n"
-        "• آدم دورو\n"
-        "• تلاش و موفقیت\n\n"
-        "۵ تا ۱۰ ضرب‌المثل مرتبط همراه با معنی برات می‌نویسم. "
+        "• رفاقت\n• صبر و شکیبایی\n• آدم دورو\n• تلاش و موفقیت\n\n"
+        "۵ تا ۱۰ ضرب‌المثل مرتبط همراه با معنی برات می‌نویسم.\n"
         "برای لغو، «گفتگوی جدید» رو بزن. 💙",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
 
 
@@ -791,15 +912,11 @@ def show_proverb_notice(chat_id):
 def build_word_request(user_text):
     return (
         "در نقش فرهنگ‌نویس دقیق زبان فارسی پاسخ بده. "
-        "واژه یا عبارت مورد پرسش کاربر: "
-        f"{user_text}\n\n"
-        "پاسخ را به فارسی و با این ساختار ارائه کن:\n"
-        "۱. معنی ساده و دقیق\n"
-        "۲. مترادف‌ها (اگر وجود دارند)\n"
-        "۳. متضادها (اگر وجود دارند)\n"
-        "۴. ریشه و خاستگاه واژه فقط در صورت اطمینان؛ اگر مطمئن نیستی "
-        "صریحاً بگو اطلاعات ریشه‌شناختی قطعی در دسترس نیست.\n"
-        "۵. یک یا دو مثال طبیعی در جمله.\n"
+        f"واژه یا عبارت مورد پرسش: {user_text}\n\n"
+        "به فارسی و با این ساختار پاسخ بده:\n"
+        "۱. معنی ساده و دقیق\n۲. مترادف‌ها\n۳. متضادها\n"
+        "۴. ریشه و خاستگاه فقط در صورت اطمینان\n"
+        "۵. یک یا دو مثال طبیعی.\n"
         "اگر واژه چند معنی دارد، معنی‌های رایج را جدا کن. "
         "اطلاعات ساختگی نساز."
     )
@@ -810,12 +927,9 @@ def build_proverb_request(topic):
         "کاربر برای موضوع زیر ضرب‌المثل فارسی می‌خواهد:\n"
         f"موضوع: {topic}\n\n"
         "۵ تا ۱۰ ضرب‌المثل واقعی و مرتبط فارسی پیشنهاد کن. "
-        "برای هر مورد، خود ضرب‌المثل و معنی کوتاه و روشن آن را بنویس. "
-        "اگر درباره اصالت یا رایج بودن عبارتی مطمئن نیستی، آن را "
-        "به‌عنوان ضرب‌المثل قطعی معرفی نکن. جمله‌های ساخته خودت را "
-        "به‌جای ضرب‌المثل جا نزن. اگر تعداد ضرب‌المثل‌های معتبر برای "
-        "موضوع کم است، تعداد کمتر اما درست ارائه کن. "
-        "در پایان، در صورت مفید بودن یک ضرب‌المثل ادبی‌تر هم معرفی کن."
+        "برای هر مورد، خود ضرب‌المثل و معنی کوتاه آن را بنویس. "
+        "جمله‌های ساخته خودت را به‌جای ضرب‌المثل جا نزن. "
+        "اگر تعداد ضرب‌المثل‌های معتبر کم است، تعداد کمتر اما درست ارائه کن."
     )
 
 
@@ -826,34 +940,53 @@ def build_proverb_request(topic):
 @bot.message_handler(commands=["start"])
 def start(message):
     clear_all_modes(str(message.chat.id))
+
+    referral_id = None
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].startswith("ref_"):
+        try:
+            referral_id = int(parts[1][4:])
+        except ValueError:
+            referral_id = None
+
+    is_new = register_user(message.from_user, referral_id)
+    if is_new:
+        logger.info("New user registered: %s", message.from_user.id)
+
     send_home(message.chat.id)
 
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
+    register_user(message.from_user)
     show_help(message.chat.id)
 
 
 @bot.message_handler(commands=["reset"])
 def reset_command(message):
+    register_user(message.from_user)
     key = str(message.chat.id)
     clear_history(key)
     clear_all_modes(key)
     bot.send_message(
         message.chat.id,
         "🔄 حافظه این گفتگو پاک شد. 💙",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )
 
 
+@bot.message_handler(commands=["stats"])
+def stats_command(message):
+    register_user(message.from_user)
+    show_stats(message.chat.id, message.from_user.id)
+
+
 # =====================================================
-# INLINE BUTTON CALLBACKS
+# INLINE CALLBACKS
 # =====================================================
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    # پاسخ callback را جداگانه مدیریت می‌کنیم تا منقضی‌شدن آن
-    # مانع اجرای عملکرد دکمه نشود.
     try:
         bot.answer_callback_query(call.id)
     except Exception as exc:
@@ -863,56 +996,50 @@ def callback_handler(call):
         chat_id = call.message.chat.id
         key = str(chat_id)
         action = call.data
+        register_user(call.from_user)
 
         if action in ("home", "new_chat"):
             clear_all_modes(key)
             if action == "new_chat":
                 clear_history(key)
             send_home(chat_id)
-
         elif action == "help":
             show_help(chat_id)
-
         elif action == "about":
             show_about(chat_id)
-
         elif action == "settings":
             show_settings(chat_id)
-
         elif action == "account":
             bot.send_message(
                 chat_id,
-                f"👤 شناسه کاربری: {call.from_user.id}\n"
+                "👤 حساب کاربری\n\n"
+                f"شناسه کاربری: {call.from_user.id}\n"
                 f"نام: {call.from_user.first_name or 'کاربر'}",
-                reply_markup=main_keyboard()
+                reply_markup=main_keyboard(),
             )
-
         elif action == "image":
             show_image_notice(chat_id)
-
+        elif action == "translate":
+            show_translate_notice(chat_id)
         elif action == "word":
             show_word_notice(chat_id)
-
         elif action == "proverb":
             show_proverb_notice(chat_id)
-
+        elif action == "invite":
+            show_invite(chat_id, call.from_user.id)
+        elif action == "stats":
+            show_stats(chat_id, call.from_user.id)
         elif action == "reset_memory":
             clear_history(key)
             bot.send_message(
                 chat_id,
                 "🧹 حافظه گفتگو با موفقیت پاک شد. 💙",
-                reply_markup=main_keyboard()
+                reply_markup=main_keyboard(),
             )
-
         else:
-            try:
-                bot.answer_callback_query(
-                    call.id,
-                    "این گزینه در دسترس نیست."
-                )
-            except Exception:
-                pass
-
+            bot.answer_callback_query(
+                call.id, "این گزینه در دسترس نیست."
+            )
     except Exception:
         logger.exception("Callback handler error")
 
@@ -930,19 +1057,25 @@ def chat(message):
     if not user_text:
         return
 
+    register_user(message.from_user)
+    update_user_activity(message.from_user)
+
     if user_text == BTN_CHAT:
         clear_all_modes(key)
         clear_history(key)
         bot.send_message(
             chat_id,
-            "💬 گفتگوی تازه شروع شد!\n"
-            "هر چیزی دوست داری بپرس. 💙",
-            reply_markup=main_keyboard()
+            "💬 گفتگوی تازه شروع شد!\nهر چیزی دوست داری بپرس. 💙",
+            reply_markup=main_keyboard(),
         )
         return
 
     if user_text == BTN_IMAGE:
         show_image_notice(chat_id)
+        return
+
+    if user_text == BTN_TRANSLATE:
+        show_translate_notice(chat_id)
         return
 
     if user_text == BTN_WORD:
@@ -958,6 +1091,16 @@ def chat(message):
         show_account(message)
         return
 
+    if user_text == BTN_STATS:
+        clear_all_modes(key)
+        show_stats(chat_id, message.from_user.id)
+        return
+
+    if user_text == BTN_INVITE:
+        clear_all_modes(key)
+        show_invite(chat_id, message.from_user.id)
+        return
+
     if user_text == BTN_HELP:
         clear_all_modes(key)
         show_help(chat_id)
@@ -968,22 +1111,47 @@ def chat(message):
         show_settings(chat_id)
         return
 
-    # حالت ساخت تصویر
+    # Translation mode
+    if has_mode(awaiting_translations, key):
+        clear_mode(awaiting_translations, key)
+        waiting = bot.send_message(
+            chat_id,
+            "🌐 در حال ترجمه متن هستم...\nلطفاً چند لحظه صبر کن. ⚡",
+        )
+        deadline = time.monotonic() + MAX_WAIT
+        try:
+            translated = translate_to_persian(user_text, deadline)
+            try:
+                bot.delete_message(chat_id, waiting.message_id)
+            except Exception:
+                pass
+            send_long_message(chat_id, "🌐 ترجمه فارسی:\n\n" + translated)
+        except Exception:
+            logger.exception("Translation failed")
+            try:
+                bot.delete_message(chat_id, waiting.message_id)
+            except Exception:
+                pass
+            bot.send_message(
+                chat_id,
+                "⚠️ ترجمه انجام نشد. لطفاً دوباره تلاش کن. 💙",
+                reply_markup=main_keyboard(),
+            )
+        return
+
+    # Image mode
     if has_mode(awaiting_images, key):
         clear_mode(awaiting_images, key)
         handle_image_request(chat_id, user_text)
         return
 
-    # حالت معنی واژه
+    # Word / proverb modes
     if has_mode(awaiting_words, key):
         clear_mode(awaiting_words, key)
         request_text = build_word_request(user_text)
-
-    # حالت ضرب‌المثل‌یاب
     elif has_mode(awaiting_proverbs, key):
         clear_mode(awaiting_proverbs, key)
         request_text = build_proverb_request(user_text)
-
     else:
         request_text = user_text
 
@@ -991,28 +1159,24 @@ def chat(message):
         waiting = bot.send_message(
             chat_id,
             "🧠 هشیوار در حال اندیشیدن است...\n"
-            "لطفاً چند لحظه صبر کن؛ بهترین پاسخ در راهه! ⚡"
+            "لطفاً چند لحظه صبر کن؛ بهترین پاسخ در راهه! ⚡",
         )
     except Exception:
         logger.exception("Could not send waiting message")
         return
 
     deadline = time.monotonic() + MAX_WAIT
-
     try:
         with get_chat_lock(key):
             check_deadline(deadline)
             answer = ask_ai(request_text, key, deadline)
 
         check_deadline(deadline)
-
         try:
             bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-
         send_long_message(chat_id, answer)
-
     except Exception:
         logger.exception("AI request failed or exceeded response deadline")
         try:
@@ -1076,7 +1240,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-
         except Exception:
             logger.exception("Webhook processing error")
             self.send_error(500)
@@ -1093,19 +1256,11 @@ if __name__ == "__main__":
     logger.info("================================")
     logger.info("STARTING HOSHIVAR AI")
     logger.info("Primary engine: Gemini - %s", GEMINI_MODEL)
-
     if CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID:
-        logger.info(
-            "Backup engine: Cloudflare - %s",
-            CLOUDFLARE_TEXT_MODEL
-        )
-        logger.info(
-            "Image engine: Cloudflare - %s",
-            CLOUDFLARE_IMAGE_MODEL
-        )
+        logger.info("Cloudflare text model: %s", CLOUDFLARE_TEXT_MODEL)
+        logger.info("Cloudflare image model: %s", CLOUDFLARE_IMAGE_MODEL)
     else:
         logger.warning("Cloudflare is not configured")
-
     logger.info("Maximum AI response time: %s seconds", MAX_WAIT)
     logger.info("================================")
 
@@ -1116,23 +1271,19 @@ if __name__ == "__main__":
         webhook_result = bot.set_webhook(
             url=WEBHOOK_URL,
             secret_token=WEBHOOK_SECRET,
-            allowed_updates=["message", "callback_query"]
+            allowed_updates=["message", "callback_query"],
         )
-
         if not webhook_result:
             raise RuntimeError("Telegram webhook setup failed")
 
         logger.info("Webhook configured successfully")
         logger.info("Hoshiwar is live")
         server.serve_forever()
-
     except KeyboardInterrupt:
         logger.info("Hoshiwar is shutting down")
-
     except Exception:
         logger.exception("Application startup failed")
         raise
-
     finally:
         server.server_close()
         http_session.close()
