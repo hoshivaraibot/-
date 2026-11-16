@@ -23,9 +23,7 @@ from telebot.types import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-GEMINI_MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3.8-flash"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 )
 
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
