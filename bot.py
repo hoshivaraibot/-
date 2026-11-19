@@ -35,6 +35,8 @@ PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 WEBHOOK_PATH = "/telegram-webhook"
+CHANNEL_USERNAME = "@HoshivarAI"
+CHANNEL_URL = "https://t.me/HoshivarAI"
 DB_PATH = os.getenv("DB_PATH", "hoshivar.db")
 MAX_WAIT = int(os.getenv("MAX_WAIT", "55"))
 IMAGE_WAIT = int(os.getenv("IMAGE_WAIT", "110"))
@@ -259,7 +261,7 @@ def set_image_prompt(key, user_id, chat_id, prompt):
         conn.execute("""
             INSERT INTO chats(chat_key,user_id,chat_id,mode,image_prompt,updated_at)
             VALUES(?,?,?,?,?,?)
-            ON CONFLICT(chat_key) DO UPDATE SET image_prompt=excluded.image_prompt, mode='image', updated_at=excluded.updated_at
+            ON CONFLICT(chat_key) DO UPDATE SET image_prompt=excluded.image_prompt, updated_at=excluded.updated_at
         """, (key, user_id, chat_id, "image", prompt, time.time()))
 
 
@@ -484,6 +486,60 @@ def send_home(chat_id, uid):
         reply_markup=main_keyboard(uid),
     )
     bot.send_message(chat_id, "🌈 از کجا شروع کنیم؟", reply_markup=inline_keyboard(uid))
+
+
+# =====================================================
+# REQUIRED CHANNEL MEMBERSHIP
+# =====================================================
+def subscription_keyboard():
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(InlineKeyboardButton("📢 عضویت در کانال هشیوار", url=CHANNEL_URL))
+    keyboard.add(InlineKeyboardButton("✅ عضو شدم؛ بررسی کن", callback_data="check_subscription"))
+    return keyboard
+
+
+def check_channel_membership(user_id):
+    """Check Telegram membership live; do not cache membership status."""
+    member = bot.get_chat_member(CHANNEL_USERNAME, user_id)
+    if member.status in ("creator", "administrator", "member"):
+        return True
+    if member.status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return False
+
+
+def show_subscription(chat_id, message_text=None):
+    if message_text is None:
+        message_text = (
+            "💙 به هشیوار خوش اومدی!\n\n"
+            "برای استفاده از ابزارهای هوشمند هشیوار، اول باید عضو کانال ما بشی.\n\n"
+            "بعد از عضویت، دکمه «عضو شدم؛ بررسی کن» رو بزن. 🤍💚"
+        )
+    bot.send_message(chat_id, message_text, reply_markup=subscription_keyboard())
+
+
+def require_subscription(chat_id, user_id):
+    """Fail closed: any Telegram API error means no access is granted."""
+    try:
+        if check_channel_membership(user_id):
+            return True
+        show_subscription(
+            chat_id,
+            "هنوز عضویتت در کانال هشیوار تأیید نشده. 💙\n\n"
+            "اول عضو کانال شو و بعد دکمه بررسی رو بزن."
+        )
+        return False
+    except Exception:
+        logger.exception("Channel membership check failed for user %s", user_id)
+        try:
+            show_subscription(
+                chat_id,
+                "⚠️ فعلاً امکان بررسی عضویت وجود نداره.\n"
+                "چند لحظه دیگه دوباره تلاش کن. 💙"
+            )
+        except Exception:
+            logger.exception("Could not send subscription error message")
+        return False
 
 # =====================================================
 # PROVIDERS
@@ -916,6 +972,8 @@ def handle_photo(message):
     chat_id, uid = message.chat.id, message.from_user.id
     key = user_key(message)
     register_user(message.from_user)
+    if not require_subscription(chat_id, uid):
+        return
     if touch_user(message.from_user):
         bot.send_message(chat_id, "دسترسی این حساب به ربات محدود شده است.")
         return
@@ -991,17 +1049,24 @@ def start(message):
         except ValueError:
             pass
     register_user(message.from_user, referral)
+    if not require_subscription(message.chat.id, message.from_user.id):
+        return
     send_home(message.chat.id, message.from_user.id)
 
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
     register_user(message.from_user)
+    if not require_subscription(message.chat.id, message.from_user.id):
+        return
     show_help(message.chat.id, message.from_user.id)
 
 
 @bot.message_handler(commands=["new"])
 def new_command(message):
+    register_user(message.from_user)
+    if not require_subscription(message.chat.id, message.from_user.id):
+        return
     key = user_key(message)
     clear_history(key)
     clear_task(key, message.from_user.id, message.chat.id)
@@ -1010,6 +1075,9 @@ def new_command(message):
 
 @bot.message_handler(commands=["reset"])
 def reset_command(message):
+    register_user(message.from_user)
+    if not require_subscription(message.chat.id, message.from_user.id):
+        return
     key = user_key(message)
     clear_history(key)
     clear_task(key, message.from_user.id, message.chat.id)
@@ -1019,6 +1087,8 @@ def reset_command(message):
 @bot.message_handler(commands=["stats"])
 def stats_command(message):
     register_user(message.from_user)
+    if not require_subscription(message.chat.id, message.from_user.id):
+        return
     show_stats(message.chat.id, message.from_user.id)
 
 # =====================================================
@@ -1027,14 +1097,34 @@ def stats_command(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
-        if not (call.data or "").startswith("tools_coming_"):
-            bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-    try:
         chat_id, uid, action = call.message.chat.id, call.from_user.id, call.data
         key = user_key(call)
         register_user(call.from_user)
+        if action == "check_subscription":
+            try:
+                is_member = check_channel_membership(uid)
+            except Exception:
+                logger.exception("Channel membership re-check failed for user %s", uid)
+                bot.answer_callback_query(call.id, "فعلاً بررسی عضویت ممکن نیست؛ کمی بعد دوباره تلاش کن.", show_alert=True)
+                show_subscription(chat_id, "⚠️ فعلاً امکان بررسی عضویت وجود نداره.\nچند لحظه دیگه دوباره تلاش کن. 💙")
+                return
+            if is_member:
+                bot.answer_callback_query(call.id, "عضویتت تأیید شد؛ خوش اومدی! 💙")
+                send_home(chat_id, uid)
+            else:
+                bot.answer_callback_query(call.id, "هنوز عضو کانال نیستی.", show_alert=True)
+                show_subscription(chat_id, "هنوز عضویتت در کانال هشیوار تأیید نشده. 💙\n\nاول عضو کانال شو و بعد دکمه بررسی رو بزن.")
+            return
+
+        try:
+            if not (action or "").startswith("tools_coming_"):
+                bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+
+        if not require_subscription(chat_id, uid):
+            return
+
         if action == "new_chat":
             clear_history(key)
             clear_task(key, uid, chat_id)
@@ -1079,6 +1169,8 @@ def handle_text(message):
     if not text:
         return
     register_user(message.from_user)
+    if not require_subscription(chat_id, uid):
+        return
     if touch_user(message.from_user):
         bot.send_message(chat_id, "دسترسی این حساب به ربات محدود شده است.")
         return
