@@ -8,6 +8,7 @@ import logging
 import threading
 import requests
 import telebot
+from PIL import Image
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,7 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
 CLOUDFLARE_TEXT_MODEL = os.getenv("CLOUDFLARE_TEXT_MODEL", "@cf/meta/llama-3.1-8b-instruct-fast")
 CLOUDFLARE_IMAGE_MODEL = os.getenv("CLOUDFLARE_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+CLOUDFLARE_EDIT_IMAGE_MODEL = os.getenv("CLOUDFLARE_EDIT_IMAGE_MODEL", "@cf/black-forest-labs/flux-2-klein-4b")
 
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
@@ -79,6 +81,8 @@ ai_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_AI)
 db_lock = threading.RLock()
 chat_locks = {}
 chat_locks_guard = threading.Lock()
+pending_image_refs = {}  # per-user Telegram photo awaiting an edit instruction
+pending_image_refs_lock = threading.Lock()
 
 # =====================================================
 # PERSONALITY: WARM, WITTY, WISE, NEVER ROBOTIC
@@ -576,12 +580,56 @@ def translate_image_prompt(prompt, deadline):
     ], deadline, max_tokens=1500, temperature=0.0)
 
 
-def generate_image(prompt, deadline):
-    result = cloudflare_request(CLOUDFLARE_IMAGE_MODEL, {"prompt": prompt[:1800], "steps": 4}, deadline)
+def prepare_reference_image(image_bytes):
+    """Resize a Telegram photo to the documented <=512px input limit."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+            image.thumbnail((510, 510), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=90, optimize=True)
+            return output.getvalue()
+    except Exception as exc:
+        raise ProviderError("Could not decode the reference image") from exc
+
+
+def generate_image(prompt, deadline, reference_image=None):
+    if reference_image:
+        # FLUX.2 Klein 4B accepts image references via multipart form data.
+        # Input images must be no larger than 512x512 pixels.
+        prepared = prepare_reference_image(reference_image)
+        response = http.post(
+            f"{CF_BASE_URL}/{CLOUDFLARE_EDIT_IMAGE_MODEL}",
+            headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+            data={"prompt": prompt[:1800], "width": "1024", "height": "1024"},
+            files={"input_image_0": ("reference.jpg", prepared, "image/jpeg")},
+            timeout=timeout_for(deadline),
+        )
+        check_deadline(deadline)
+        if not response.ok:
+            raise ProviderError(
+                f"Cloudflare image-edit HTTP {response.status_code}: {error_detail(response)}"
+            )
+        data = response.json()
+        if data.get("success") is False:
+            raise ProviderError(str(data.get("errors") or "Cloudflare image edit failed"))
+        result = data.get("result", data)
+    else:
+        result = cloudflare_request(
+            CLOUDFLARE_IMAGE_MODEL,
+            {"prompt": prompt[:1800], "steps": 4},
+            deadline,
+        )
+
     image_b64 = result.get("image")
     if not image_b64:
         raise ProviderError("Image provider returned no image")
-    raw = base64.b64decode(image_b64, validate=True)
+    if isinstance(image_b64, str) and image_b64.startswith("data:"):
+        image_b64 = image_b64.split(",", 1)[-1]
+    try:
+        raw = base64.b64decode(image_b64, validate=True)
+    except Exception as exc:
+        raise ProviderError("Image provider returned invalid image data") from exc
     if not raw:
         raise ProviderError("Image provider returned empty image")
     return raw
@@ -608,7 +656,7 @@ def show_help(chat_id, uid):
         "🌍 زبان‌یار: متن را بفرست و زبان مقصد را مشخص کن؛ مثلاً «این متن رو به انگلیسی ترجمه کن».\n"
         "📖 واژه‌کاو: یک واژه بفرست؛ مثلاً «معنی، مترادف و متضاد واژه دانایی رو بگو».\n"
         "📜 مثل‌دان: موضوع را بنویس؛ مثلاً «برای صبر و شکیبایی چند ضرب‌المثل بگو».\n"
-        "🎨 خیال‌نگار: تصویر دلخواهت را توصیف کن؛ مثلاً «یک گربه سفید بامزه زیر آسمان پرستاره بساز».\n"
+        "🎨 خیال‌نگار: هم می‌تونی تصویر تازه بسازی، هم عکس بفرستی و تغییر دلخواهت رو روی همون عکس بخوای.\n"
         "🪄 قصه‌پرداز: موضوع یا شخصیت‌ها را بگو؛ مثلاً «یک قصه کوتاه درباره دوستی یک روباه و پرنده بنویس».\n"
         "✍️ متن‌آرا: متن را بفرست و تغییر دلخواهت را بگو؛ مثلاً «این پیام رو صمیمی‌تر و روان‌تر کن».\n\n"
         "💡 نکته: ابزار انتخاب‌شده فعال می‌ماند تا خودت ابزار دیگری انتخاب کنی یا گفتگوی جدید بزنی. بازکردن منو، حساب یا راهنما حالت ابزار را تغییر نمی‌دهد. 💚",
@@ -665,7 +713,7 @@ def set_tool(message, mode, title, description):
 def select_tool(chat_id, user_id, key, mode):
     set_mode(key, user_id, chat_id, mode)
     notices = {
-        "image": ("🎨 خیال‌نگار؛ وقت جان‌دادن به ایده‌هاست! ✨", "🖼️ چیزی رو که می‌خوای ببینی توصیف کن.\nمثلاً: «یک کلبه چوبی کنار دریا، هنگام غروب، با نور گرم و سبک واقع‌گرایانه بساز.»\n💡 هر تغییری خواستی بعد از ساخت بگو؛ جزئیات قبلی رو نگه می‌دارم."),
+        "image": ("🎨 خیال‌نگار؛ وقت جان‌دادن به ایده‌هاست! ✨", "🖼️ برای ساخت تصویر، ایده‌ات رو توصیف کن.\nمثلاً: «یک کلبه چوبی کنار دریا، هنگام غروب بساز.»\n📷 برای ویرایش عکس، عکس رو همراه توضیح بفرست؛ یا اول عکس رو بفرست و بعد بنویس چه تغییری می‌خوای.\n💡 تلاش می‌کنم سوژه‌ها و چهره‌های عکس اصلی حفظ بشن."),
         "translate": ("🌍 زبان‌یار؛ پلی بین زبان‌ها! 💚", "📝 متن رو بفرست و اگر زبان مقصد رو می‌دونی مشخص کن.\nمثلاً: «این جمله رو به انگلیسی ترجمه کن: از آشنایی با تو خوشحالم.»\n✨ اگر مقصد رو نگفتی، معمولاً به فارسی ترجمه می‌کنم."),
         "word": ("📖 واژه‌کاو؛ بریم سراغ راز واژه‌ها! 🤍", "🔎 کلمه یا عبارت رو بفرست تا معنی، کاربرد، مترادف، متضاد و مثال‌هاش رو بگم.\nمثلاً: «معنی واژه خردمند چیه؟ دو مترادف و یک مثال هم بزن.»"),
         "proverb": ("📜 مثل‌دان؛ برای هر حال‌وهوا، یک مثل! 🌱", "💭 موضوع یا موقعیت رو بنویس تا ضرب‌المثل‌های مرتبط رو همراه با معنی و کاربردشون پیدا کنم.\nمثلاً: «برای عجله کردن و پشیمانی چه ضرب‌المثلی داریم؟»"),
@@ -702,44 +750,96 @@ def textcraft_request(prompt):
 # =====================================================
 # IMAGE TASK: preserve previous prompt and mode
 # =====================================================
-def handle_image(chat_id, uid, key, user_text):
+def handle_image(chat_id, uid, key, user_text, reference_image=None):
     if not CF_BASE_URL:
         bot.send_message(chat_id, "سرویس تصویرسازی فعلاً پیکربندی نشده؛ اما حالت تصویر رو نگه می‌دارم تا بعداً ادامه بدیم.", reply_markup=main_keyboard(uid))
         return
     previous = get_image_prompt(key)
-    if previous:
+    if previous and not reference_image:
         combined = (
             "Original request (preserve all unchanged details):\n" + previous +
             "\n\nUser's latest revision:\n" + user_text +
             "\n\nApply the requested changes only. Keep all other original requirements."
         )
+    elif reference_image:
+        combined = (
+            "Edit the supplied reference photograph. Treat the supplied image as the source of truth. "
+            "Preserve the same people, their facial identity, age, skin tone, body proportions, clothing "
+            "and relationship. Do not replace them with different people or invent extra people. "
+            "Make only the changes requested here; keep all unmentioned details as close to the source "
+            "photograph as possible. User's requested edit: " + user_text
+        )
+        if previous:
+            combined += "\nPrevious image task context (keep only details that do not conflict with this edit): " + previous
     else:
         combined = user_text
-    waiting = bot.send_message(chat_id, "🎨 دارم جزئیات ایده‌ات رو کنار هم می‌چینم... کمی صبر کن. ⚡")
+
+    waiting_text = "🪄 عکس رو با حفظ سوژه‌های اصلی و تغییر موردنظرت ویرایش می‌کنم..." if reference_image else "🎨 دارم جزئیات ایده‌ات رو کنار هم می‌چینم... کمی صبر کن. ⚡"
+    waiting = bot.send_message(chat_id, waiting_text)
     deadline = time.monotonic() + IMAGE_WAIT
     try:
         with ai_semaphore:
             english = translate_image_prompt(combined, deadline)
-            image_bytes = generate_image(english, deadline)
+            image_bytes = generate_image(english, deadline, reference_image=reference_image)
         check_deadline(deadline)
         set_image_prompt(key, uid, chat_id, combined)
         photo = io.BytesIO(image_bytes)
-        photo.name = "hoshivar-image.png"
+        photo.name = "hoshivar-edited-image.jpg"
         try:
             bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-        bot.send_photo(chat_id, photo, caption="آماده شد! ✨ اگر بخشی رو می‌خوای عوض کنیم، فقط بگو؛ جزئیات قبلی یادم هست. 💙", reply_markup=main_keyboard(uid), timeout=40)
-        log_usage(uid, "image")
+        caption = "عکس ویرایش شد! ✨ اگر تغییر دیگری می‌خواهی، بگو. 💙" if reference_image else "آماده شد! ✨ اگر بخشی رو می‌خوای عوض کنیم، فقط بگو؛ جزئیات قبلی یادم هست. 💙"
+        bot.send_photo(chat_id, photo, caption=caption, reply_markup=main_keyboard(uid), timeout=40)
+        log_usage(uid, "image_edit" if reference_image else "image")
     except Exception:
-        logger.exception("Image generation failed")
+        logger.exception("Image generation/editing failed")
         try:
             bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-        bot.send_message(chat_id, "این بار تصویر آماده نشد؛ گاهی سرویس کمی بدقلقی می‌کنه. درخواستت رو نگه داشتم، می‌تونی دوباره تلاش کنی.", reply_markup=main_keyboard(uid))
+        bot.send_message(chat_id, "این بار تصویر آماده نشد؛ درخواست و حالت تصویر رو نگه داشتم. کمی بعد دوباره تلاش کن.", reply_markup=main_keyboard(uid))
     finally:
         set_mode(key, uid, chat_id, "image")
+
+
+def download_telegram_photo(message):
+    if not message.photo:
+        raise ValueError("Message has no photo")
+    photo = message.photo[-1]
+    file_info = bot.get_file(photo.file_id)
+    image_bytes = bot.download_file(file_info.file_path)
+    if not image_bytes:
+        raise ProviderError("Telegram returned an empty photo")
+    return image_bytes
+
+
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message):
+    chat_id, uid = message.chat.id, message.from_user.id
+    key = user_key(message)
+    register_user(message.from_user)
+    if touch_user(message.from_user):
+        bot.send_message(chat_id, "دسترسی این حساب به ربات محدود شده است.")
+        return
+    if is_maintenance() and uid not in ADMIN_IDS:
+        bot.send_message(chat_id, "هشیوار فعلاً در حال رسیدگی و مرتب‌کردن اوضاعه. کمی بعد برگرد.")
+        return
+    if get_mode(key) != "image":
+        bot.send_message(chat_id, "برای ویرایش عکس، اول ابزار «خیال‌نگار» رو انتخاب کن؛ بعد عکس رو بفرست. 💙", reply_markup=main_keyboard(uid))
+        return
+    try:
+        reference = download_telegram_photo(message)
+        caption = (message.caption or "").strip()
+        if caption:
+            handle_image(chat_id, uid, key, caption, reference_image=reference)
+        else:
+            with pending_image_refs_lock:
+                pending_image_refs[key] = reference
+            bot.send_message(chat_id, "عکست رسید. حالا بنویس چه تغییری می‌خوای؛ مثلاً «همین دو نفر رو با حفظ چهره داخل مسجد نشان بده». 💙")
+    except Exception:
+        logger.exception("Photo receive failed")
+        bot.send_message(chat_id, "نتونستم عکس رو دریافت کنم. لطفاً یک بار دیگه به‌صورت عکس معمولی بفرست.", reply_markup=main_keyboard(uid))
 
 # =====================================================
 # ADMIN PANEL (restricted to ADMIN_IDS)
@@ -944,7 +1044,9 @@ def handle_text(message):
 
     mode = get_mode(key)
     if mode == "image":
-        handle_image(chat_id, uid, key, text)
+        with pending_image_refs_lock:
+            reference = pending_image_refs.pop(key, None)
+        handle_image(chat_id, uid, key, text, reference_image=reference)
         return
 
     waiting = None
