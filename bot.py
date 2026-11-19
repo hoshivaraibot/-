@@ -1,3 +1,4 @@
+
 import os
 import re
 import io
@@ -8,7 +9,7 @@ import logging
 import threading
 import requests
 import telebot
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -411,6 +412,44 @@ def tools_keyboard():
     return k
 
 
+def image_studio_keyboard():
+    k = InlineKeyboardMarkup(row_width=2)
+    k.row(InlineKeyboardButton("🎨 خیال‌نگار | ساخت تصویر", callback_data="img_generate"))
+    k.row(InlineKeyboardButton("🪄 دگرگون‌ساز | ویرایش عکس", callback_data="img_edit"),
+          InlineKeyboardButton("🏞️ پس‌زمینه‌چین", callback_data="img_background"))
+    k.row(InlineKeyboardButton("✨ شفاف‌ساز | بهبود وضوح", callback_data="img_enhance"))
+    k.row(InlineKeyboardButton("🏠 صفحه اصلی", callback_data="home"))
+    return k
+
+
+def show_image_studio(chat_id, uid):
+    bot.send_message(
+        chat_id,
+        "🖼️ استودیوی تصویر هشیوار\n\n"
+        "🎨 خیال‌نگار: ساخت تصویر از توضیح متنی، بدون نیاز به عکس.\n"
+        "🪄 دگرگون‌ساز: ویرایش عکس با حفظ سوژه‌های اصلی.\n"
+        "🏞️ پس‌زمینه‌چین: تغییر محیط و پس‌زمینه عکس.\n"
+        "✨ شفاف‌ساز: افزایش وضوح و شارپ‌سازی پایه عکس.\n\n"
+        "یکی از بخش‌ها رو انتخاب کن تا وارد همون حالت بشی. 💙🤍💚",
+        reply_markup=image_studio_keyboard(),
+    )
+
+
+def select_image_mode(chat_id, uid, key, mode):
+    set_mode(key, uid, chat_id, mode)
+    set_image_prompt(key, uid, chat_id, "")
+    with pending_image_refs_lock:
+        pending_image_refs.pop(key, None)
+    messages = {
+        "image_generate": ("🎨 خیال‌نگار فعال شد", "ایده‌ات رو به فارسی توصیف کن تا تصویر تازه بسازم. مثلاً: یک مسجد باشکوه در دشتی سرسبز با کوه‌های مه‌آلود، نور صبح و سبک کاملاً واقع‌گرایانه."),
+        "image_edit": ("🪄 دگرگون‌ساز فعال شد", "اول عکس رو بفرست؛ می‌تونی توضیح رو همراه عکس یا در پیام بعدی بنویسی. فقط تغییرهایی رو انجام می‌دم که درخواست می‌کنی."),
+        "image_background": ("🏞️ پس‌زمینه‌چین فعال شد", "عکس رو بفرست و بگو پس‌زمینه به چه محیطی تبدیل بشه؛ مثلاً ساحل، جنگل، مسجد یا فضای آتلیه. سوژه اصلی باید تا حد امکان حفظ بشه."),
+        "image_enhance": ("✨ شفاف‌ساز فعال شد", "عکس رو بفرست تا وضوح، اندازه و شارپ‌بودن آن را با پردازش پایه بهتر کنم. این روش بازسازی هوش مصنوعی جزئیات ازدست‌رفته نیست."),
+    }
+    title, desc = messages[mode]
+    bot.send_message(chat_id, f"{title}\n\n{desc}\n\nبرای رفتن به ابزار دیگر، خودت از منوی ابزارها انتخاب کن.", reply_markup=main_keyboard(uid))
+
+
 def account_keyboard():
     k = InlineKeyboardMarkup(row_width=2)
     k.row(InlineKeyboardButton("📊 آمار و فعالیت", callback_data="stats"),
@@ -569,15 +608,21 @@ def translate_text(text, deadline):
 def translate_image_prompt(prompt, deadline):
     return cloudflare_text([
         {"role": "system", "content": (
-            "Translate the user's image request into a precise English image prompt. "
-            "Do not reinterpret it or add creative elements. Preserve every subject, "
-            "object, quantity, location, action, pose, expression, clothing, color, "
-            "lighting, camera angle, composition, background and style. Preserve "
-            "negative constraints. If the request is ambiguous, translate literally "
-            "rather than guessing. Return only the English prompt."
+            "You are Hoshivar's professional image-prompt engineer. Convert the user's Persian request "
+            "into a polished, production-ready English image prompt. Improve clarity, composition, camera, "
+            "lighting and material detail where useful, but never invent extra subjects, props, people, "
+            "architecture, weather or styling. Preserve the exact requested number of people. "
+            "For photo editing, explicitly treat the input photo as the immutable source of truth: keep "
+            "the same identities, faces, expressions, age, skin tone, body shape, pose and clothing unless "
+            "the user explicitly asks to change one of them. Change only the requested region or property. "
+            "For background replacement, preserve foreground people and objects; replace only the background "
+            "with the exact environment requested, including its weather, vegetation and lighting. "
+            "For text-to-image, follow the user's subject and scene literally and add only professional "
+            "photographic details that do not alter the concept. Specify photorealism only when appropriate. "
+            "Avoid contradictory instructions and avoid generic filler. Return only the final English prompt."
         )},
         {"role": "user", "content": prompt},
-    ], deadline, max_tokens=1500, temperature=0.0)
+    ], deadline, max_tokens=1700, temperature=0.0)
 
 
 def prepare_reference_image(image_bytes):
@@ -656,7 +701,7 @@ def show_help(chat_id, uid):
         "🌍 زبان‌یار: متن را بفرست و زبان مقصد را مشخص کن؛ مثلاً «این متن رو به انگلیسی ترجمه کن».\n"
         "📖 واژه‌کاو: یک واژه بفرست؛ مثلاً «معنی، مترادف و متضاد واژه دانایی رو بگو».\n"
         "📜 مثل‌دان: موضوع را بنویس؛ مثلاً «برای صبر و شکیبایی چند ضرب‌المثل بگو».\n"
-        "🎨 خیال‌نگار: هم می‌تونی تصویر تازه بسازی، هم عکس بفرستی و تغییر دلخواهت رو روی همون عکس بخوای.\n"
+        "🖼️ استودیوی تصویر: خیال‌نگار برای ساخت تصویر، دگرگون‌ساز برای ویرایش، پس‌زمینه‌چین برای تغییر محیط و شفاف‌ساز برای بهبود وضوح.\n"
         "🪄 قصه‌پرداز: موضوع یا شخصیت‌ها را بگو؛ مثلاً «یک قصه کوتاه درباره دوستی یک روباه و پرنده بنویس».\n"
         "✍️ متن‌آرا: متن را بفرست و تغییر دلخواهت را بگو؛ مثلاً «این پیام رو صمیمی‌تر و روان‌تر کن».\n\n"
         "💡 نکته: ابزار انتخاب‌شده فعال می‌ماند تا خودت ابزار دیگری انتخاب کنی یا گفتگوی جدید بزنی. بازکردن منو، حساب یا راهنما حالت ابزار را تغییر نمی‌دهد. 💚",
@@ -713,7 +758,7 @@ def set_tool(message, mode, title, description):
 def select_tool(chat_id, user_id, key, mode):
     set_mode(key, user_id, chat_id, mode)
     notices = {
-        "image": ("🎨 خیال‌نگار؛ وقت جان‌دادن به ایده‌هاست! ✨", "🖼️ برای ساخت تصویر، ایده‌ات رو توصیف کن.\nمثلاً: «یک کلبه چوبی کنار دریا، هنگام غروب بساز.»\n📷 برای ویرایش عکس، عکس رو همراه توضیح بفرست؛ یا اول عکس رو بفرست و بعد بنویس چه تغییری می‌خوای.\n💡 تلاش می‌کنم سوژه‌ها و چهره‌های عکس اصلی حفظ بشن."),
+        "image": ("🖼️ استودیوی تصویر هشیوار", "از منوی بازشده یکی از چهار بخش خیال‌نگار، دگرگون‌ساز، پس‌زمینه‌چین یا شفاف‌ساز رو انتخاب کن."),
         "translate": ("🌍 زبان‌یار؛ پلی بین زبان‌ها! 💚", "📝 متن رو بفرست و اگر زبان مقصد رو می‌دونی مشخص کن.\nمثلاً: «این جمله رو به انگلیسی ترجمه کن: از آشنایی با تو خوشحالم.»\n✨ اگر مقصد رو نگفتی، معمولاً به فارسی ترجمه می‌کنم."),
         "word": ("📖 واژه‌کاو؛ بریم سراغ راز واژه‌ها! 🤍", "🔎 کلمه یا عبارت رو بفرست تا معنی، کاربرد، مترادف، متضاد و مثال‌هاش رو بگم.\nمثلاً: «معنی واژه خردمند چیه؟ دو مترادف و یک مثال هم بزن.»"),
         "proverb": ("📜 مثل‌دان؛ برای هر حال‌وهوا، یک مثل! 🌱", "💭 موضوع یا موقعیت رو بنویس تا ضرب‌المثل‌های مرتبط رو همراه با معنی و کاربردشون پیدا کنم.\nمثلاً: «برای عجله کردن و پشیمانی چه ضرب‌المثلی داریم؟»"),
@@ -747,34 +792,91 @@ def textcraft_request(prompt):
             "\nمعنای اصلی، اطلاعات، نام‌ها و منظور نویسنده را حفظ کن مگر کاربر صریحاً تغییر بخواهد. "
             "اگر فقط اصلاح نگارشی خواسته، محتوا را بازنویسی اساسی نکن. خروجی را مستقیم و آماده استفاده ارائه کن.")
 
+def enhance_image_basic(image_bytes):
+    """Non-AI enhancement: 2x Lanczos resize and restrained sharpening."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+            width, height = image.size
+            scale = min(2.0, 3000 / max(width, height))
+            if scale > 1.0:
+                image = image.resize((int(width * scale), int(height * scale)), Image.Resampling.LANCZOS)
+            image = ImageEnhance.Contrast(image).enhance(1.03)
+            image = ImageEnhance.Sharpness(image).enhance(1.35)
+            image = image.filter(ImageFilter.UnsharpMask(radius=1.4, percent=115, threshold=3))
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=94, optimize=True)
+            return out.getvalue()
+    except Exception as exc:
+        raise ProviderError("Could not enhance the image") from exc
+
+
 # =====================================================
 # IMAGE TASK: preserve previous prompt and mode
 # =====================================================
 def handle_image(chat_id, uid, key, user_text, reference_image=None):
-    if not CF_BASE_URL:
-        bot.send_message(chat_id, "سرویس تصویرسازی فعلاً پیکربندی نشده؛ اما حالت تصویر رو نگه می‌دارم تا بعداً ادامه بدیم.", reply_markup=main_keyboard(uid))
+    mode = get_mode(key)
+    if mode == "image_enhance":
+        if not reference_image:
+            bot.send_message(chat_id, "برای شفاف‌سازی، اول عکس رو بفرست.")
+            return
+        waiting = bot.send_message(chat_id, "✨ دارم وضوح عکس رو به روش پایه بهتر می‌کنم...")
+        try:
+            result = enhance_image_basic(reference_image)
+            photo = io.BytesIO(result)
+            photo.name = "hoshivar-enhanced.jpg"
+            try: bot.delete_message(chat_id, waiting.message_id)
+            except Exception: pass
+            bot.send_photo(chat_id, photo, caption="✨ وضوح و شارپ‌بودن عکس بهبود داده شد. توجه: این نسخه بازسازی AI نیست.", reply_markup=main_keyboard(uid), timeout=40)
+            log_usage(uid, "image_enhance")
+        except Exception:
+            logger.exception("Basic image enhancement failed")
+            try: bot.delete_message(chat_id, waiting.message_id)
+            except Exception: pass
+            bot.send_message(chat_id, "بهبود عکس انجام نشد؛ لطفاً یک عکس معمولی با حجم کمتر بفرست.", reply_markup=main_keyboard(uid))
+        finally:
+            set_mode(key, uid, chat_id, "image_enhance")
         return
+
+    is_generation = mode == "image_generate"
+    is_background = mode == "image_background"
+    if not CF_BASE_URL:
+        bot.send_message(chat_id, "سرویس تصویرسازی تنظیم نشده؛ فعلاً امکان اجرای این ابزار نیست.", reply_markup=main_keyboard(uid))
+        return
+    if is_generation and reference_image:
+        bot.send_message(chat_id, "برای خیال‌نگار، توضیح متنی بفرست. برای ویرایش عکس، بخش دگرگون‌ساز رو انتخاب کن.")
+        return
+    if not is_generation and not reference_image:
+        bot.send_message(chat_id, "اول عکس رو بفرست تا بتونم ویرایشش کنم.")
+        return
+
     previous = get_image_prompt(key)
-    if previous and not reference_image:
-        combined = (
-            "Original request (preserve all unchanged details):\n" + previous +
-            "\n\nUser's latest revision:\n" + user_text +
-            "\n\nApply the requested changes only. Keep all other original requirements."
-        )
-    elif reference_image:
-        combined = (
-            "Edit the supplied reference photograph. Treat the supplied image as the source of truth. "
-            "Preserve the same people, their facial identity, age, skin tone, body proportions, clothing "
-            "and relationship. Do not replace them with different people or invent extra people. "
-            "Make only the changes requested here; keep all unmentioned details as close to the source "
-            "photograph as possible. User's requested edit: " + user_text
-        )
-        if previous:
-            combined += "\nPrevious image task context (keep only details that do not conflict with this edit): " + previous
+    if reference_image:
+        if is_background:
+            combined = (
+                "BACKGROUND REPLACEMENT ONLY. Use the supplied photograph as the source image. "
+                "Keep every foreground person and foreground object: same exact number of people, "
+                "same facial identity, face shape, expression, age, skin tone, hair, clothing, body "
+                "proportions, pose and position. Do not remove, duplicate, replace or redesign them. "
+                "Replace only the background with the precise scene requested by the user. "
+                "Match perspective, shadows and natural lighting. User's background request: " + user_text
+            )
+        else:
+            combined = (
+                "EDIT THE PROVIDED PHOTO, DO NOT CREATE A DIFFERENT SCENE FROM SCRATCH. "
+                "Treat the input as the source of truth. Preserve all people and objects not explicitly "
+                "requested to change. Preserve the exact number of people and their facial identities, "
+                "features, expressions, age, skin tone, hair, clothing, body proportions and poses. "
+                "Apply only the requested changes. User's exact edit request: " + user_text
+            )
     else:
         combined = user_text
+        if previous:
+            combined = ("Original image brief (keep unchanged requirements):\n" + previous +
+                        "\nLatest user change:\n" + user_text +
+                        "\nApply only the latest change and preserve all other requirements.")
 
-    waiting_text = "🪄 عکس رو با حفظ سوژه‌های اصلی و تغییر موردنظرت ویرایش می‌کنم..." if reference_image else "🎨 دارم جزئیات ایده‌ات رو کنار هم می‌چینم... کمی صبر کن. ⚡"
+    waiting_text = "🏞️ پس‌زمینه رو طبق خواسته‌ات تغییر می‌دم..." if is_background else ("🪄 عکس رو با حفظ سوژه‌های اصلی ویرایش می‌کنم..." if reference_image else "🎨 دارم تصویرت رو می‌سازم...")
     waiting = bot.send_message(chat_id, waiting_text)
     deadline = time.monotonic() + IMAGE_WAIT
     try:
@@ -784,23 +886,19 @@ def handle_image(chat_id, uid, key, user_text, reference_image=None):
         check_deadline(deadline)
         set_image_prompt(key, uid, chat_id, combined)
         photo = io.BytesIO(image_bytes)
-        photo.name = "hoshivar-edited-image.jpg"
-        try:
-            bot.delete_message(chat_id, waiting.message_id)
-        except Exception:
-            pass
-        caption = "عکس ویرایش شد! ✨ اگر تغییر دیگری می‌خواهی، بگو. 💙" if reference_image else "آماده شد! ✨ اگر بخشی رو می‌خوای عوض کنیم، فقط بگو؛ جزئیات قبلی یادم هست. 💙"
-        bot.send_photo(chat_id, photo, caption=caption, reply_markup=main_keyboard(uid), timeout=40)
-        log_usage(uid, "image_edit" if reference_image else "image")
+        photo.name = "hoshivar-image.jpg"
+        try: bot.delete_message(chat_id, waiting.message_id)
+        except Exception: pass
+        caption = "🏞️ پس‌زمینه تغییر کرد؛ اگر اصلاح دیگری می‌خواهی بگو." if is_background else ("🪄 عکس ویرایش شد؛ اگر تغییر دیگری می‌خواهی بگو." if reference_image else "🎨 تصویرت آماده شد!")
+        bot.send_photo(chat_id, photo, caption=caption + " 💙", reply_markup=main_keyboard(uid), timeout=40)
+        log_usage(uid, "image_background" if is_background else ("image_edit" if reference_image else "image_generate"))
     except Exception:
         logger.exception("Image generation/editing failed")
-        try:
-            bot.delete_message(chat_id, waiting.message_id)
-        except Exception:
-            pass
-        bot.send_message(chat_id, "این بار تصویر آماده نشد؛ درخواست و حالت تصویر رو نگه داشتم. کمی بعد دوباره تلاش کن.", reply_markup=main_keyboard(uid))
+        try: bot.delete_message(chat_id, waiting.message_id)
+        except Exception: pass
+        bot.send_message(chat_id, "این بار تصویر آماده نشد. حالت فعلی رو نگه داشتم؛ کمی بعد دوباره تلاش کن.", reply_markup=main_keyboard(uid))
     finally:
-        set_mode(key, uid, chat_id, "image")
+        set_mode(key, uid, chat_id, mode)
 
 
 def download_telegram_photo(message):
@@ -825,8 +923,8 @@ def handle_photo(message):
     if is_maintenance() and uid not in ADMIN_IDS:
         bot.send_message(chat_id, "هشیوار فعلاً در حال رسیدگی و مرتب‌کردن اوضاعه. کمی بعد برگرد.")
         return
-    if get_mode(key) != "image":
-        bot.send_message(chat_id, "برای ویرایش عکس، اول ابزار «خیال‌نگار» رو انتخاب کن؛ بعد عکس رو بفرست. 💙", reply_markup=main_keyboard(uid))
+    if get_mode(key) not in ("image_edit", "image_background", "image_enhance"):
+        bot.send_message(chat_id, "برای ویرایش عکس، اول دگرگون‌ساز، پس‌زمینه‌چین یا شفاف‌ساز رو از استودیوی تصویر انتخاب کن. 💙", reply_markup=main_keyboard(uid))
         return
     try:
         reference = download_telegram_photo(message)
@@ -952,7 +1050,12 @@ def callback_handler(call):
         elif action == "account": show_account(chat_id, uid)
         elif action == "tools":
             bot.send_message(chat_id, "🧰 جعبه‌ابزار هشیوار 💙💚🤍\n\nهر کدوم از این ابزارها برای کاری ساخته شده؛ انتخابش کن تا راهنمای کوتاه و مثال‌هاش رو ببینی. ✨", reply_markup=tools_keyboard())
-        elif action in ("image", "translate", "word", "proverb", "story", "textcraft"):
+        elif action == "image":
+            show_image_studio(chat_id, uid)
+        elif action in ("img_generate", "img_edit", "img_background", "img_enhance"):
+            image_modes = {"img_generate": "image_generate", "img_edit": "image_edit", "img_background": "image_background", "img_enhance": "image_enhance"}
+            select_image_mode(chat_id, uid, key, image_modes[action])
+        elif action in ("translate", "word", "proverb", "story", "textcraft"):
             select_tool(chat_id, uid, key, action)
         elif action == "invite": show_invite(chat_id, uid)
         elif action == "stats": show_stats(chat_id, uid)
@@ -998,9 +1101,11 @@ def handle_text(message):
         bot.send_message(chat_id, "خب، بریم سراغ یک شروع تازه! این بار از کجا شروع کنیم؟ 🌱", reply_markup=main_keyboard(uid))
         return
     tool_shortcuts = {
-        BTN_IMAGE: "image", BTN_TRANSLATE: "translate", BTN_WORD: "word",
+        BTN_TRANSLATE: "translate", BTN_WORD: "word",
         BTN_PROVERB: "proverb", BTN_STORY: "story", BTN_TEXT: "textcraft",
     }
+    if text == BTN_IMAGE:
+        show_image_studio(chat_id, uid); return
     if text in tool_shortcuts:
         select_tool(chat_id, uid, key, tool_shortcuts[text]); return
     if text == BTN_ACCOUNT:
@@ -1043,7 +1148,7 @@ def handle_text(message):
         return
 
     mode = get_mode(key)
-    if mode == "image":
+    if mode in ("image_generate", "image_edit", "image_background", "image_enhance"):
         with pending_image_refs_lock:
             reference = pending_image_refs.pop(key, None)
         handle_image(chat_id, uid, key, text, reference_image=reference)
