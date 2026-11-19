@@ -3,12 +3,13 @@ import re
 import io
 import time
 import base64
+import sqlite3
 import logging
 import threading
 import requests
 import telebot
 
-from collections import OrderedDict
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton,
@@ -16,667 +17,763 @@ from telebot.types import (
 )
 
 # =====================================================
-# HOSHIVAR AI | CONFIG
+# HOSHIVAR | CONFIGURATION
 # =====================================================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 X1_API_KEY = os.getenv("X1_API_KEY") or os.getenv("1XAI_API_KEY")
 X1_BASE_URL = os.getenv("X1_BASE_URL", "https://1xai.ir/v1").rstrip("/")
-# نام مدل باید با مدل‌های فعال حساب 1xAI مطابقت داشته باشد.
 X1_MODEL = os.getenv("X1_MODEL", "gpt-4o-mini")
 
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
-CLOUDFLARE_TEXT_MODEL = os.getenv(
-    "CLOUDFLARE_TEXT_MODEL", "@cf/meta/llama-3.1-8b-instruct-fast"
-)
-CLOUDFLARE_IMAGE_MODEL = os.getenv(
-    "CLOUDFLARE_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell"
-)
+CLOUDFLARE_TEXT_MODEL = os.getenv("CLOUDFLARE_TEXT_MODEL", "@cf/meta/llama-3.1-8b-instruct-fast")
+CLOUDFLARE_IMAGE_MODEL = os.getenv("CLOUDFLARE_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
 
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 WEBHOOK_PATH = "/telegram-webhook"
-
+DB_PATH = os.getenv("DB_PATH", "hoshivar.db")
 MAX_WAIT = int(os.getenv("MAX_WAIT", "55"))
 IMAGE_WAIT = int(os.getenv("IMAGE_WAIT", "110"))
-MAX_HISTORY = 12
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "12"))
 MAX_MESSAGE_LENGTH = 3900
-MAX_CACHED_CHATS = 3000
 MAX_CONCURRENT_AI = int(os.getenv("MAX_CONCURRENT_AI", "8"))
+MAX_USERS_BROADCAST_BATCH = 20
 
 ADMIN_IDS = {
-    int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",")
-    if x.strip().isdigit()
+    int(v.strip()) for v in os.getenv("ADMIN_IDS", "").split(",")
+    if v.strip().isdigit()
 }
 
-for name, value in (
+for env_name, env_value in (
     ("BOT_TOKEN", BOT_TOKEN),
     ("X1_API_KEY", X1_API_KEY),
     ("WEBHOOK_SECRET", WEBHOOK_SECRET),
     ("RENDER_EXTERNAL_URL", RENDER_URL),
 ):
-    if not value:
-        raise ValueError(f"{name} is missing")
+    if not env_value:
+        raise RuntimeError(f"Required environment variable is missing: {env_name}")
 
 if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
-    raise ValueError("Invalid WEBHOOK_SECRET")
-
+    raise RuntimeError("WEBHOOK_SECRET must contain only letters, numbers, _ or -")
 if bool(CLOUDFLARE_ACCOUNT_ID) != bool(CLOUDFLARE_API_TOKEN):
-    raise ValueError("Set both Cloudflare credentials or leave both empty")
+    raise RuntimeError("Set both Cloudflare credentials or leave both empty")
 
 X1_CHAT_URL = f"{X1_BASE_URL}/chat/completions"
 CF_BASE_URL = (
-    f"https://api.cloudflare.com/client/v4/accounts/"
-    f"{CLOUDFLARE_ACCOUNT_ID}/ai/run"
-) if CLOUDFLARE_ACCOUNT_ID else None
+    f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run"
+    if CLOUDFLARE_ACCOUNT_ID else None
+)
 WEBHOOK_URL = RENDER_URL.rstrip("/") + WEBHOOK_PATH
 
 # =====================================================
-# LOGGING / HTTP
+# LOGGING / CLIENTS
 # =====================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("HOSHIVAR")
-
 http = requests.Session()
-http.headers.update({"User-Agent": "Hoshivar-Telegram-Bot/2.0"})
+http.headers.update({"User-Agent": "Hoshivar-Telegram-Bot/3.0"})
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=8)
 ai_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_AI)
+db_lock = threading.RLock()
+chat_locks = {}
+chat_locks_guard = threading.Lock()
 
 # =====================================================
-# PERSONALITY | SHORT, NON-REPETITIVE INSTRUCTIONS
+# PERSONALITY: WARM, WITTY, WISE, NEVER ROBOTIC
 # =====================================================
+SYSTEM_PROMPT = r"""
+تو «هشیوار» هستی؛ یک دستیار هوشمند با شخصیت مستقل، خردمند، خوش‌ذوق، شیرین‌زبان، صمیمی و دقیق.
 
-SYSTEM_PROMPT = """
-تو «هشیوار» هستی؛ دستیار هوش مصنوعی فارسی‌زبان، خردمند، خلاق، دقیق و خوش‌برخورد.
+هویت و لحن:
+- مثل یک همراه باهوش و خوش‌صحبت حرف بزن؛ نه مثل فرم اداری، نه مثل ربات خشک و نه مثل شخصیت نمایشی و اغراق‌آمیز.
+- گرما و مهربانی را در انتخاب واژه‌ها نشان بده. گاهی شوخی ظریف، بازی زبانی یا جمله‌ای بانمک به‌جا استفاده کن؛ اما لوس، کودکانه یا تصنعی نشو.
+- خردمند باش، نه خطیب دائمی. فقط وقتی به فهم موضوع کمک می‌کند از نکته حکیمانه، مثال یا تشبیه استفاده کن.
+- در موقعیت جدی، ناراحتی، خطر یا تصمیم مهم، شوخی را کنار بگذار و آرام، محترمانه و دقیق باش.
+- به جای تعارف‌های تکراری، واکنش متناسب و تازه نشان بده. لازم نیست هر پاسخ را با پیشنهاد یا جمله احساسی تمام کنی.
+- اگر کاربر تشکر کرد، طبیعی و کوتاه جواب بده. اگر فقط سلام کرد، گرم و سرزنده پاسخ بده و راه شروع گفتگو را باز بگذار.
+- پاسخ‌های ساده را ساده و کوتاه نگه دار؛ موضوعات پیچیده را کامل، روشن و مرحله‌بندی‌شده توضیح بده.
+- از ایموجی کم اما بجا استفاده کن؛ 💙 و 🌱 در موقعیت مناسب مجازند.
 
-اصول رفتاری:
-- ابتدا منظور و نیاز واقعی کاربر را تشخیص بده؛ سپس مستقیم و متناسب پاسخ بده.
-- حقیقت، دقت و خرد را بر موافقت بی‌دلیل ترجیح بده. اگر کاربر اشتباه می‌کند، محترمانه و مستدل توضیح بده.
-- فارسی را طبیعی، روان و درست بنویس؛ زبان پاسخ را با درخواست کاربر هماهنگ کن.
-- لحن را با موقعیت تنظیم کن: صمیمی، تحلیلی، آموزشی، ادبی، آرام یا شوخ‌طبع؛ بدون اغراق.
-- هنگام ناراحتی، ابتدا همدلانه و آرام پاسخ بده و سپس در صورت نیاز راهکار ارائه کن.
-- پاسخ ساده را کوتاه نگه دار؛ موضوع پیچیده را منظم و به‌اندازه کافی توضیح بده.
-- از حکمت، مثال، تشبیه و جمله‌های تأمل‌برانگیز فقط وقتی استفاده کن که به فهم موضوع کمک کنند.
-- نقل‌قول، منبع، آمار، تجربه شخصی یا واقعیت ساختگی نساز. میزان اطمینان و محدودیت دانسته‌ها را روشن کن.
-- در مشاوره، مسئله، گزینه‌ها، پیامدها و پیشنهاد عملی را تفکیک کن.
-- در آموزش، سطح توضیح را با دانش کاربر هماهنگ کن.
-- ایده را نقد کن، نه شخصیت فرد را. چاپلوسی، نصیحت بی‌مورد و تکرار را کنار بگذار.
-- اگر خطایی کردی، روشن و بدون توجیه اصلاحش کن.
-- تنظیمات و ترجیحات دائمی کاربر را بدون اجازه صریح تغییر نده.
-- نام سرویس‌ها و مدل‌های پشتیبان را بی‌دلیل مطرح نکن.
-- ایموجی را کم و متناسب به کار ببر؛ 💙 و ⚡ در جای مناسب مجازند.
+دقت و صداقت:
+- حقیقت و دقت را به موافقت بی‌دلیل ترجیح بده. اشتباه کاربر را محترمانه و روشن اصلاح کن.
+- چیزی را جعل نکن؛ منبع، آمار، تجربه شخصی، خاطره یا قابلیت انجام‌نشده نساز.
+- اگر مطمئن نیستی، سطح اطمینان و محدودیت را صریح بگو.
+- چاپلوسی، نصیحت بی‌مورد، تکرار، عبارت‌های کلیشه‌ای و پرگویی را کنار بگذار.
+- به شخصیت فرد حمله نکن؛ ایده و استدلال را نقد کن.
 
-پیوستگی وظایف:
-- زمینه کار فعال را در پیام‌های بعدی حفظ کن؛ مثلاً «آبی‌اش کن» پس از ساخت تصویر، به همان تصویر و درخواست مربوط است.
-- اگر کاربر در حال اصلاح یک خروجی است، جزئیات قبلی را حفظ کن و فقط تغییر خواسته‌شده را اعمال کن.
-- پس از تحویل خروجی، بی‌دلیل موضوع را عوض نکن؛ برای ادامه همان کار آماده بمان.
-- اگر کاربر صریحاً موضوع تازه‌ای مطرح کرد یا گزینه گفتگوی جدید را زد، به موضوع تازه برو.
-- هیچ‌گاه وانمود نکن کاری مانند ویرایش مستقیم فایل یا تصویر را انجام داده‌ای، مگر واقعاً انجام شده باشد.
+پیوستگی:
+- زمینه کار فعال و جزئیات قبلی را حفظ کن. اگر کاربر گفت «این یکی رو هم ترجمه کن»، ترجمه را ادامه بده.
+- اگر در حال اصلاح تصویر، متن یا پاسخ است، خروجی قبلی و خواسته‌های قبلی را مبنا قرار بده و فقط تغییر خواسته‌شده را اعمال کن.
+- بعد از انجام یک کار، خودسرانه به گفتگوی عادی یا ابزار دیگری نپر.
+- اگر کاربر صریحاً ابزار دیگری انتخاب کرد، موضوع را عوض کرد یا گفت گفتگوی جدید، مطابق همان عمل کن.
+- ترجیحات دائمی را بدون اجازه روشن کاربر تغییر نده.
+
+زبان:
+- زبان پاسخ را با زبان کاربر هماهنگ کن. فارسی را طبیعی، روان و درست بنویس.
+- در ترجمه، معنی، لحن، نام‌ها، عددها و قالب متن را حفظ کن؛ خلاصه‌سازی نکن مگر خواسته شود.
 """
 
 # =====================================================
-# MENU
+# DATABASE: persistent users, history, modes, counters
 # =====================================================
+@contextmanager
+def db_conn():
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
+
+def init_db():
+    with db_conn() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            first_name TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            first_seen REAL NOT NULL,
+            last_seen REAL NOT NULL,
+            referred_by INTEGER,
+            is_blocked INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS chats (
+            chat_key TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'chat',
+            image_prompt TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_chat ON history(chat_key, id);
+        CREATE TABLE IF NOT EXISTS usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_created ON usage(created_at);
+        CREATE TABLE IF NOT EXISTS settings (
+            name TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS profile_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            memory_text TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_profile_memory_user ON profile_memory(user_id, id);
+        """)
+
+
+def user_key(message_or_call):
+    chat = message_or_call.chat if hasattr(message_or_call, "chat") else message_or_call.message.chat
+    user = message_or_call.from_user
+    # Per-user state prevents people in group chats from sharing task/history.
+    return f"{chat.id}:{user.id}"
+
+
+def lock_for(key):
+    with chat_locks_guard:
+        return chat_locks.setdefault(key, threading.Lock())
+
+
+def register_user(user, referral_id=None):
+    now = time.time()
+    with db_conn() as conn:
+        existing = conn.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE users SET first_name=?, username=?, last_seen=? WHERE user_id=?",
+                (user.first_name or "کاربر", user.username or "", now, user.id),
+            )
+            return False
+        valid_ref = None
+        if referral_id and referral_id != user.id:
+            ref = conn.execute("SELECT user_id FROM users WHERE user_id=?", (referral_id,)).fetchone()
+            if ref:
+                valid_ref = referral_id
+        conn.execute(
+            "INSERT INTO users(user_id,first_name,username,first_seen,last_seen,referred_by) VALUES(?,?,?,?,?,?)",
+            (user.id, user.first_name or "کاربر", user.username or "", now, now, valid_ref),
+        )
+        return True
+
+
+def touch_user(user):
+    now = time.time()
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE users SET first_name=?, username=?, last_seen=? WHERE user_id=?",
+            (user.first_name or "کاربر", user.username or "", now, user.id),
+        )
+        row = conn.execute("SELECT is_blocked FROM users WHERE user_id=?", (user.id,)).fetchone()
+        return bool(row["is_blocked"]) if row else False
+
+
+def get_mode(key):
+    with db_conn() as conn:
+        row = conn.execute("SELECT mode FROM chats WHERE chat_key=?", (key,)).fetchone()
+        return row["mode"] if row else "chat"
+
+
+def set_mode(key, user_id, chat_id, mode):
+    with db_conn() as conn:
+        conn.execute("""
+            INSERT INTO chats(chat_key,user_id,chat_id,mode,updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(chat_key) DO UPDATE SET mode=excluded.mode, updated_at=excluded.updated_at
+        """, (key, user_id, chat_id, mode, time.time()))
+
+
+def get_image_prompt(key):
+    with db_conn() as conn:
+        row = conn.execute("SELECT image_prompt FROM chats WHERE chat_key=?", (key,)).fetchone()
+        return row["image_prompt"] if row else ""
+
+
+def set_image_prompt(key, user_id, chat_id, prompt):
+    with db_conn() as conn:
+        conn.execute("""
+            INSERT INTO chats(chat_key,user_id,chat_id,mode,image_prompt,updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(chat_key) DO UPDATE SET image_prompt=excluded.image_prompt, mode='image', updated_at=excluded.updated_at
+        """, (key, user_id, chat_id, "image", prompt, time.time()))
+
+
+def clear_task(key, user_id=None, chat_id=None):
+    with db_conn() as conn:
+        if user_id is None or chat_id is None:
+            conn.execute("DELETE FROM chats WHERE chat_key=?", (key,))
+        else:
+            conn.execute("""
+                INSERT INTO chats(chat_key,user_id,chat_id,mode,image_prompt,updated_at)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(chat_key) DO UPDATE SET mode='chat', image_prompt='', updated_at=excluded.updated_at
+            """, (key, user_id, chat_id, "chat", "", time.time()))
+
+
+def get_history(key):
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT role,content FROM history WHERE chat_key=? ORDER BY id DESC LIMIT ?",
+            (key, MAX_HISTORY * 2),
+        ).fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
+def save_history(key, user_text, answer):
+    now = time.time()
+    with db_conn() as conn:
+        conn.executemany(
+            "INSERT INTO history(chat_key,role,content,created_at) VALUES(?,?,?,?)",
+            [(key, "user", user_text, now), (key, "assistant", answer, now)],
+        )
+        conn.execute("""
+            DELETE FROM history WHERE chat_key=? AND id NOT IN
+            (SELECT id FROM history WHERE chat_key=? ORDER BY id DESC LIMIT ?)
+        """, (key, key, MAX_HISTORY * 2))
+
+
+def clear_history(key):
+    with db_conn() as conn:
+        conn.execute("DELETE FROM history WHERE chat_key=?", (key,))
+
+
+def log_usage(user_id, tool):
+    with db_conn() as conn:
+        conn.execute("INSERT INTO usage(user_id,tool,created_at) VALUES(?,?,?)", (user_id, tool, time.time()))
+
+
+def get_profile_memories(user_id):
+    with db_conn() as conn:
+        rows = conn.execute("SELECT memory_text FROM profile_memory WHERE user_id=? ORDER BY id DESC LIMIT 30", (user_id,)).fetchall()
+    return [row["memory_text"] for row in reversed(rows)]
+
+
+def add_profile_memory(user_id, memory_text):
+    memory_text = memory_text.strip()[:700]
+    if not memory_text:
+        return
+    with db_conn() as conn:
+        exists = conn.execute("SELECT id FROM profile_memory WHERE user_id=? AND memory_text=?", (user_id, memory_text)).fetchone()
+        if not exists:
+            conn.execute("INSERT INTO profile_memory(user_id,memory_text,created_at) VALUES(?,?,?)", (user_id, memory_text, time.time()))
+
+
+def delete_profile_memory(user_id, phrase=None):
+    with db_conn() as conn:
+        if phrase:
+            conn.execute("DELETE FROM profile_memory WHERE user_id=? AND memory_text LIKE ?", (user_id, f"%{phrase}%"))
+        else:
+            conn.execute("DELETE FROM profile_memory WHERE user_id=?", (user_id,))
+
+
+def show_profile_memory(chat_id, user_id):
+    items = get_profile_memories(user_id)
+    if not items:
+        text = "حافظه بلندمدتت هنوز خالیه. اگر خواستی چیزی رو نگه دارم، با «یادت باشه ...» بهم بگو. 💙"
+    else:
+        text = "🧠 چیزهایی که با اجازه‌ات برای شناخت بهتر ترجیحاتت نگه داشته‌ام:\n\n" + "\n".join(f"• {item}" for item in items)
+        text += "\n\nبرای حذف یک مورد بنویس: «فراموش کن [عبارت]»؛ برای پاک‌کردن همه بنویس: «همه حافظه‌ام رو پاک کن»."
+    bot.send_message(chat_id, text, reply_markup=main_keyboard(user_id))
+
+
+def is_maintenance():
+    with db_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE name='maintenance'").fetchone()
+        return bool(row and row["value"] == "1")
+
+
+def set_maintenance(enabled):
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO settings(name,value) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+            ("1" if enabled else "0",),
+        )
+
+# =====================================================
+# TELEGRAM MENU: ONE CLEAN HOME PAGE, TOOLS IN SUBMENUS
+# =====================================================
 BTN_CHAT = "💬 گفتگوی جدید"
+BTN_TOOLS = "🧰 ابزارها"
+BTN_ACCOUNT = "👤 حساب کاربری"
+BTN_SETTINGS = "⚙️ تنظیمات"
+BTN_HELP = "ℹ️ راهنما"
+BTN_MENU = "🏠 منوی اصلی"
+
+# Tool names are intentionally kept as internal menu labels, not crowded
+# onto the persistent home keyboard.
 BTN_IMAGE = "🎨 ساخت تصویر"
 BTN_TRANSLATE = "🌐 ترجمه"
 BTN_WORD = "📚 معنی کلمات"
 BTN_PROVERB = "🪶 ضرب‌المثل‌یاب"
-BTN_ACCOUNT = "👤 حساب کاربری"
 BTN_STATS = "📊 آمار ربات"
 BTN_INVITE = "👥 دعوت دوستان"
-BTN_HELP = "ℹ️ راهنما"
-BTN_SETTINGS = "⚙️ تنظیمات"
 
-def main_keyboard():
+
+def main_keyboard(uid=None):
+    """Compact persistent home navigation."""
     k = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2, is_persistent=True)
-    k.row(KeyboardButton(BTN_CHAT), KeyboardButton(BTN_IMAGE))
-    k.row(KeyboardButton(BTN_TRANSLATE), KeyboardButton(BTN_WORD))
-    k.row(KeyboardButton(BTN_PROVERB), KeyboardButton(BTN_ACCOUNT))
-    k.row(KeyboardButton(BTN_STATS), KeyboardButton(BTN_INVITE))
-    k.row(KeyboardButton(BTN_SETTINGS), KeyboardButton(BTN_HELP))
+    k.row(KeyboardButton(BTN_CHAT), KeyboardButton(BTN_TOOLS))
+    k.row(KeyboardButton(BTN_ACCOUNT), KeyboardButton(BTN_SETTINGS))
+    k.row(KeyboardButton(BTN_HELP))
     return k
 
-def inline_keyboard():
+
+def inline_keyboard(uid=None):
+    """Home page actions; detailed tools live one level deeper."""
     k = InlineKeyboardMarkup(row_width=2)
-    k.row(InlineKeyboardButton("💬 گفتگوی جدید", callback_data="new_chat"))
-    k.row(
-        InlineKeyboardButton("🎨 ساخت تصویر", callback_data="image"),
-        InlineKeyboardButton("🌐 ترجمه", callback_data="translate")
-    )
-    k.row(
-        InlineKeyboardButton("📚 معنی کلمات", callback_data="word"),
-        InlineKeyboardButton("🪶 ضرب‌المثل", callback_data="proverb")
-    )
-    k.row(
-        InlineKeyboardButton("👤 حساب کاربری", callback_data="account"),
-        InlineKeyboardButton("👥 دعوت دوستان", callback_data="invite")
-    )
-    k.row(
-        InlineKeyboardButton("📊 آمار", callback_data="stats"),
-        InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")
-    )
-    k.row(
-        InlineKeyboardButton("ℹ️ راهنما", callback_data="help"),
-        InlineKeyboardButton("💙 درباره هشیوار", callback_data="about")
-    )
+    k.row(InlineKeyboardButton("💬 گفتگوی هوشمند", callback_data="new_chat"))
+    k.row(InlineKeyboardButton("🧰 ورود به ابزارها", callback_data="tools"))
+    k.row(InlineKeyboardButton("👤 حساب کاربری", callback_data="account"),
+          InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings"))
+    k.row(InlineKeyboardButton("ℹ️ راهنما", callback_data="help"),
+          InlineKeyboardButton("💙 درباره هشیوار", callback_data="about"))
+    if uid in ADMIN_IDS:
+        k.row(InlineKeyboardButton("🛠 پنل مدیریت", callback_data="admin"))
     return k
+
+
+def tools_keyboard():
+    k = InlineKeyboardMarkup(row_width=2)
+    k.row(InlineKeyboardButton("🌐 ابزارهای زبانی", callback_data="tools_language"))
+    k.row(InlineKeyboardButton("🎨 تصویر و خلاقیت", callback_data="tools_creative"))
+    # These categories are visible as planned sections, but are not falsely
+    # advertised as working until their handlers/providers are implemented.
+    k.row(InlineKeyboardButton("📄 فایل و اسناد · به‌زودی", callback_data="tools_coming_files"))
+    k.row(InlineKeyboardButton("🎙 ابزارهای صوتی · به‌زودی", callback_data="tools_coming_audio"))
+    k.row(InlineKeyboardButton("🔎 جست‌وجو و پژوهش · به‌زودی", callback_data="tools_coming_research"))
+    k.row(InlineKeyboardButton("🏠 صفحه اصلی", callback_data="home"))
+    return k
+
+
+def language_tools_keyboard():
+    k = InlineKeyboardMarkup(row_width=2)
+    k.row(InlineKeyboardButton("🌐 ترجمه", callback_data="translate"),
+          InlineKeyboardButton("📚 معنی کلمات", callback_data="word"))
+    k.row(InlineKeyboardButton("🪶 ضرب‌المثل‌یاب", callback_data="proverb"))
+    k.row(InlineKeyboardButton("🔙 بازگشت به ابزارها", callback_data="tools"))
+    return k
+
+
+def creative_tools_keyboard():
+    k = InlineKeyboardMarkup(row_width=2)
+    k.row(InlineKeyboardButton("🎨 ساخت تصویر", callback_data="image"))
+    k.row(InlineKeyboardButton("🔙 بازگشت به ابزارها", callback_data="tools"))
+    return k
+
+
+def account_keyboard():
+    k = InlineKeyboardMarkup(row_width=2)
+    k.row(InlineKeyboardButton("📊 آمار و فعالیت", callback_data="stats"),
+          InlineKeyboardButton("👥 دعوت دوستان", callback_data="invite"))
+    k.row(InlineKeyboardButton("🏠 صفحه اصلی", callback_data="home"))
+    return k
+
 
 def settings_keyboard():
     k = InlineKeyboardMarkup()
-    k.add(InlineKeyboardButton("🧹 پاک کردن حافظه گفتگو", callback_data="reset_memory"))
-    k.add(InlineKeyboardButton("🔙 منوی اصلی", callback_data="home"))
+    k.add(InlineKeyboardButton("🧹 پاک‌کردن حافظه همین گفتگو", callback_data="reset_memory"))
+    k.add(InlineKeyboardButton("🏠 صفحه اصلی", callback_data="home"))
     return k
 
-def send_home(chat_id):
+
+def admin_keyboard():
+    k = InlineKeyboardMarkup(row_width=2)
+    k.row(InlineKeyboardButton("📊 آمار کامل", callback_data="admin_stats"), InlineKeyboardButton("🩺 سلامت سرویس‌ها", callback_data="admin_health"))
+    k.row(InlineKeyboardButton("🔧 روشن/خاموش تعمیرات", callback_data="admin_maintenance"))
+    k.row(InlineKeyboardButton("🔙 صفحه اصلی", callback_data="home"))
+    return k
+
+
+def send_home(chat_id, uid):
     bot.send_message(
         chat_id,
-        "سلام! به هشیوار خوش اومدی. 💙\n\n"
-        "می‌تونی گفت‌وگو کنی یا از ابزارهای منو استفاده کنی.",
-        reply_markup=main_keyboard()
+        "سلام، خوش اومدی به هشیوار! 💙\n\n"
+        "اینجا می‌تونیم فکرها رو مرتب کنیم، چیزهای تازه یاد بگیریم و ایده‌هات رو جان بدیم.\n"
+        "هر راهی رو خواستی انتخاب کن؛ من هم‌قدمتم. 🌱",
+        reply_markup=main_keyboard(uid),
     )
-    bot.send_message(chat_id, "برای دسترسی سریع:", reply_markup=inline_keyboard())
+    bot.send_message(chat_id, "از اینجا شروع کنیم:", reply_markup=inline_keyboard(uid))
 
 # =====================================================
-# MEMORY / ACTIVE TASKS
+# PROVIDERS
 # =====================================================
-
-memory = OrderedDict()
-memory_lock = threading.RLock()
-chat_locks = {}
-chat_locks_lock = threading.Lock()
-
-# Modes: image, translate, word, proverb. Image mode remains active
-# after generation so the user can request revisions in natural language.
-modes = {}
-modes_lock = threading.RLock()
-active_image_prompts = {}
-active_image_lock = threading.RLock()
-
-users = {}
-users_lock = threading.Lock()
-
-def chat_lock(key):
-    with chat_locks_lock:
-        if key not in chat_locks:
-            chat_locks[key] = threading.Lock()
-        return chat_locks[key]
-
-def get_history(key):
-    with memory_lock:
-        return list(memory.get(key, []))
-
-def save_history(key, user_text, answer):
-    with memory_lock:
-        history = memory.get(key, [])
-        history.extend([
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": answer}
-        ])
-        memory[key] = history[-MAX_HISTORY * 2:]
-        memory.move_to_end(key)
-        while len(memory) > MAX_CACHED_CHATS:
-            memory.popitem(last=False)
-
-def clear_history(key):
-    with memory_lock:
-        memory.pop(key, None)
-
-def set_mode(key, mode):
-    with modes_lock:
-        modes[key] = mode
-
-def get_mode(key):
-    with modes_lock:
-        return modes.get(key)
-
-def clear_mode(key):
-    with modes_lock:
-        modes.pop(key, None)
-
-def clear_task(key):
-    clear_mode(key)
-    with active_image_lock:
-        active_image_prompts.pop(key, None)
-
-def register_user(user, referral_id=None):
-    uid = user.id
-    now = time.time()
-    with users_lock:
-        if uid in users:
-            users[uid]["last_seen"] = now
-            return False
-        users[uid] = {
-            "first_name": user.first_name or "کاربر",
-            "username": user.username or "",
-            "first_seen": now,
-            "last_seen": now,
-            "referred_by": None,
-            "referrals": 0,
-        }
-        if referral_id and referral_id != uid and referral_id in users:
-            users[uid]["referred_by"] = referral_id
-            users[referral_id]["referrals"] += 1
-        return True
-
-def total_referrals():
-    with users_lock:
-        return sum(x["referrals"] for x in users.values())
-
-# =====================================================
-# PROVIDER UTILITIES
-# =====================================================
-
-class DeadlineExceeded(Exception):
+class ProviderError(Exception):
     pass
 
-class ProviderError(Exception):
-    def __init__(self, provider, status, detail):
-        self.provider, self.status, self.detail = provider, status, detail
-        super().__init__(f"{provider} HTTP {status}: {detail}")
 
 def timeout_for(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 1:
-        raise DeadlineExceeded("Deadline exceeded")
+        raise TimeoutError("Request deadline exceeded")
     connect = min(5.0, max(1.0, remaining / 4))
-    read = max(1.0, remaining - connect - 0.5)
-    return connect, read
+    return connect, max(1.0, remaining - connect - 0.5)
+
 
 def check_deadline(deadline):
     if time.monotonic() >= deadline:
-        raise DeadlineExceeded("Deadline exceeded")
+        raise TimeoutError("Request deadline exceeded")
+
 
 def error_detail(response):
     try:
         data = response.json()
-        if isinstance(data, dict):
-            err = data.get("error", data.get("errors", data))
-            if isinstance(err, dict):
-                return str(err.get("message") or err)[:1200]
-            return str(err)[:1200]
+        return str(data.get("error", data.get("errors", data)))[:1000]
     except Exception:
-        pass
-    return (response.text or "Unknown provider error")[:1200]
+        return (response.text or "Unknown error")[:1000]
 
-# =====================================================
-# 1XAI OPENAI-COMPATIBLE CHAT API
-# =====================================================
 
-def ask_1xai(user_text, key, deadline):
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+def ask_1xai(user_text, key, deadline, user_id=None):
+    system_text = SYSTEM_PROMPT
+    if user_id is not None:
+        saved = get_profile_memories(user_id)
+        if saved:
+            system_text += "\n\nاطلاعات بلندمدتی که کاربر صریحاً اجازه داده به خاطر بسپاری (فقط در موارد مرتبط استفاده کن):\n- " + "\n- ".join(saved)
+    messages = [{"role": "system", "content": system_text}]
     messages.extend(get_history(key))
     messages.append({"role": "user", "content": user_text})
-
     response = http.post(
         X1_CHAT_URL,
-        headers={
-            "Authorization": f"Bearer {X1_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": X1_MODEL,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 1800,
-        },
+        headers={"Authorization": f"Bearer {X1_API_KEY}", "Content-Type": "application/json"},
+        json={"model": X1_MODEL, "messages": messages, "temperature": 0.78, "max_tokens": 2000},
         timeout=timeout_for(deadline),
     )
     check_deadline(deadline)
     if not response.ok:
-        raise ProviderError("1xAI", response.status_code, error_detail(response))
+        raise ProviderError(f"1xAI HTTP {response.status_code}: {error_detail(response)}")
     data = response.json()
     choices = data.get("choices") or []
     if not choices:
-        raise RuntimeError("1xAI returned no choices")
-    answer = choices[0].get("message", {}).get("content", "")
-    if isinstance(answer, list):
-        answer = "".join(
-            p.get("text", "") for p in answer if isinstance(p, dict)
-        )
-    if not isinstance(answer, str) or not answer.strip():
-        raise RuntimeError("1xAI returned empty response")
-    return answer.strip()
+        raise ProviderError("1xAI response had no choices")
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, list):
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    if not isinstance(content, str) or not content.strip():
+        raise ProviderError("1xAI returned empty content")
+    return content.strip()
 
-# =====================================================
-# CLOUDFLARE TEXT / IMAGE
-# =====================================================
 
 def cloudflare_request(model, payload, deadline):
-    if not CF_BASE_URL or not CLOUDFLARE_API_TOKEN:
+    if not CF_BASE_URL:
         raise RuntimeError("Cloudflare is not configured")
     response = http.post(
         f"{CF_BASE_URL}/{model}",
-        headers={
-            "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout_for(deadline),
     )
     check_deadline(deadline)
     if not response.ok:
-        raise ProviderError("Cloudflare", response.status_code, error_detail(response))
+        raise ProviderError(f"Cloudflare HTTP {response.status_code}: {error_detail(response)}")
     data = response.json()
     if data.get("success") is False:
-        raise RuntimeError(str(data.get("errors") or "Cloudflare failed"))
+        raise ProviderError(str(data.get("errors") or "Cloudflare request failed"))
     return data.get("result", data)
 
+
 def cloudflare_text(messages, deadline, max_tokens=1800, temperature=0.2):
-    result = cloudflare_request(
-        CLOUDFLARE_TEXT_MODEL,
-        {
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        },
-        deadline,
-    )
+    result = cloudflare_request(CLOUDFLARE_TEXT_MODEL, {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}, deadline)
     answer = result.get("response", "")
     if not answer and result.get("choices"):
         answer = result["choices"][0].get("message", {}).get("content", "")
     if not isinstance(answer, str) or not answer.strip():
-        raise RuntimeError("Cloudflare returned empty text")
+        raise ProviderError("Cloudflare returned empty text")
     return answer.strip()
 
-def ask_ai(user_text, key, deadline):
+
+def ask_ai(user_text, key, deadline, user_id=None):
     try:
-        answer = ask_1xai(user_text, key, deadline)
+        answer = ask_1xai(user_text, key, deadline, user_id)
         logger.info("Text provider: 1xAI")
     except Exception as primary_error:
-        logger.warning("1xAI failed; trying Cloudflare fallback: %s", primary_error)
+        logger.warning("1xAI failed; using Cloudflare fallback: %s", primary_error)
         check_deadline(deadline)
-        history_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        history_messages.extend(get_history(key))
-        history_messages.append({"role": "user", "content": user_text})
-        answer = cloudflare_text(history_messages, deadline)
+        system_text = SYSTEM_PROMPT
+        if user_id is not None:
+            saved = get_profile_memories(user_id)
+            if saved:
+                system_text += "\n\nاطلاعات بلندمدت مورد تأیید کاربر (فقط در موارد مرتبط):\n- " + "\n- ".join(saved)
+        messages = [{"role": "system", "content": system_text}] + get_history(key) + [{"role": "user", "content": user_text}]
+        answer = cloudflare_text(messages, deadline)
         logger.info("Text provider: Cloudflare fallback")
     check_deadline(deadline)
     save_history(key, user_text, answer)
     return answer
 
+
 def translate_text(text, deadline):
-    return cloudflare_text(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise multilingual translator. Detect the source "
-                    "language automatically. Translate the entire text into natural "
-                    "Persian (Farsi), unless the user explicitly requests another "
-                    "target language. Preserve meaning, tone, names, numbers, "
-                    "formatting and paragraphs. Do not summarize or add commentary. "
-                    "Return only the translation."
-                ),
-            },
-            {"role": "user", "content": text},
-        ],
-        deadline,
-        max_tokens=2500,
-        temperature=0.1,
-    )
+    return cloudflare_text([
+        {"role": "system", "content": (
+            "You are an expert multilingual translator. Detect source language. "
+            "Translate the complete input into natural Persian unless the user explicitly "
+            "specifies another target language. Preserve meaning, register, emotion, "
+            "names, numbers, formatting and paragraphs. Do not summarize, explain or "
+            "add invented context. Return only the translation."
+        )},
+        {"role": "user", "content": text},
+    ], deadline, max_tokens=2500, temperature=0.1)
+
 
 def translate_image_prompt(prompt, deadline):
-    return cloudflare_text(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Convert the user's complete image request into a detailed "
-                    "English image-generation prompt. Preserve all requested "
-                    "subjects, counts, identity constraints, appearance, clothing, "
-                    "pose, expression, setting, objects, colors, lighting, framing, "
-                    "composition, style and realism. Do not invent details. "
-                    "Return only the English prompt."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        deadline,
-        max_tokens=1300,
-        temperature=0.1,
-    )
+    return cloudflare_text([
+        {"role": "system", "content": (
+            "Translate the user's image request into a precise English image prompt. "
+            "Do not reinterpret it or add creative elements. Preserve every subject, "
+            "object, quantity, location, action, pose, expression, clothing, color, "
+            "lighting, camera angle, composition, background and style. Preserve "
+            "negative constraints. If the request is ambiguous, translate literally "
+            "rather than guessing. Return only the English prompt."
+        )},
+        {"role": "user", "content": prompt},
+    ], deadline, max_tokens=1500, temperature=0.0)
+
 
 def generate_image(prompt, deadline):
-    if len(prompt) > 1800:
-        prompt = prompt[:1800]
-    result = cloudflare_request(
-        CLOUDFLARE_IMAGE_MODEL,
-        {"prompt": prompt, "steps": 4},
-        deadline,
-    )
+    result = cloudflare_request(CLOUDFLARE_IMAGE_MODEL, {"prompt": prompt[:1800], "steps": 4}, deadline)
     image_b64 = result.get("image")
     if not image_b64:
-        raise RuntimeError("Image provider returned no image")
+        raise ProviderError("Image provider returned no image")
     raw = base64.b64decode(image_b64, validate=True)
     if not raw:
-        raise RuntimeError("Empty image")
+        raise ProviderError("Image provider returned empty image")
     return raw
 
 # =====================================================
-# MESSAGE HELPERS / PAGES
+# UI / TOOL HELPERS
 # =====================================================
+def send_long(chat_id, text, uid=None):
+    chunks = [text[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(text), MAX_MESSAGE_LENGTH)] or [""]
+    for index, chunk in enumerate(chunks):
+        bot.send_message(chat_id, chunk, reply_markup=main_keyboard(uid) if index == len(chunks) - 1 else None)
 
-def send_long(chat_id, text):
-    chunks = [text[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(text), MAX_MESSAGE_LENGTH)]
-    for i, chunk in enumerate(chunks):
-        bot.send_message(
-            chat_id, chunk,
-            reply_markup=main_keyboard() if i == len(chunks) - 1 else None
-        )
 
-def generic_error(chat_id):
-    bot.send_message(
-        chat_id,
-        "⚠️ هشیوار فعلاً نتونست پاسخ رو آماده کنه. کمی بعد دوباره تلاش کن.",
-        reply_markup=main_keyboard()
-    )
+def show_help(chat_id, uid):
+    bot.send_message(chat_id,
+        "راهنمای هشیوار 🌱\n\n"
+        "💬 گفتگوی جدید: شروع یک مکالمه تازه\n"
+        "🧰 ابزارها: دسته‌بندی ابزارهای زبانی و تصویری\n"
+        "👤 حساب کاربری: آمار شخصی و دعوت دوستان\n"
+        "⚙️ تنظیمات: مدیریت حافظه و تنظیمات گفتگو\n"
+        "ℹ️ راهنما: آشنایی با امکانات هشیوار\n\n"
+        "با بازکردن منو، ابزار فعال عوض نمی‌شود. ابزار انتخاب‌شده تا وقتی ابزار دیگری را انتخاب نکنی یا گفتگوی جدید نزنی، فعال می‌ماند.", reply_markup=main_keyboard(uid))
 
-def show_help(chat_id):
-    bot.send_message(
-        chat_id,
-        "ℹ️ راهنمای هشیوار\n\n"
-        "💬 گفتگوی جدید: شروع مکالمه تازه و پاک شدن زمینه قبلی\n"
-        "🎨 ساخت تصویر: ساخت تصویر و ادامه اصلاح درخواست با پیام‌های بعدی\n"
-        "🌐 ترجمه: تشخیص خودکار زبان و ترجمه به فارسی\n"
-        "📚 معنی کلمات: معنی، مترادف، متضاد و مثال\n"
-        "🪶 ضرب‌المثل‌یاب: ضرب‌المثل‌های مرتبط با موضوع\n"
-        "👤 حساب کاربری، 👥 دعوت دوستان و 📊 آمار\n"
-        "⚙️ تنظیمات: پاک کردن حافظه گفتگو",
-        reply_markup=main_keyboard()
-    )
 
-def show_about(chat_id):
-    bot.send_message(
-        chat_id,
-        "💙 هشیوار یک دستیار هوش مصنوعی برای گفت‌وگو، یادگیری، "
-        "نوشتن، ترجمه، تحلیل و خلاقیت است.\n\n"
-        "هدفش پاسخ‌گویی دقیق، طبیعی و کاربردی است؛ "
-        "با حفظ زمینه کارهایی که با هم انجام می‌دهیم.",
-        reply_markup=main_keyboard()
-    )
+def show_about(chat_id, uid):
+    bot.send_message(chat_id,
+        "هشیوار؛ همراهی برای فکرهای بزرگ و سؤال‌های کوچک. 💙\n\n"
+        "قرار است دقیق باشد، اما خشک نه؛ خردمند باشد، اما نصیحت‌گر نه؛ "
+        "خوش‌صحبت باشد، اما پرحرف نه.", reply_markup=main_keyboard(uid))
+
 
 def show_settings(chat_id):
-    bot.send_message(
-        chat_id,
-        "⚙️ تنظیمات\n\nمی‌توانی حافظه مکالمه فعلی را پاک کنی.",
-        reply_markup=settings_keyboard()
-    )
+    bot.send_message(chat_id, "⚙️ تنظیمات گفتگو\n\n• تاریخچه گفتگو در پایگاه داده نگه‌داری می‌شود.\n• حافظه بلندمدت فقط با درخواست روشن تو ثبت می‌شود.\n• برای دیدن حافظه بنویس «حافظه من».\n• برای ثبت مورد تازه بنویس «یادت باشه ...».\n• برای حذف موردی بنویس «فراموش کن ...».\n• ابزار انتخاب‌شده با نمایش منو عوض نمی‌شود.", reply_markup=settings_keyboard())
 
-def show_account(message):
-    bot.send_message(
-        message.chat.id,
-        "👤 حساب کاربری\n\n"
-        f"شناسه: {message.from_user.id}\n"
-        f"نام: {message.from_user.first_name or 'کاربر'}",
-        reply_markup=main_keyboard()
-    )
+
+def show_account(chat_id, uid):
+    with db_conn() as conn:
+        row = conn.execute("SELECT first_name,username,first_seen FROM users WHERE user_id=?", (uid,)).fetchone()
+        refs = conn.execute("SELECT COUNT(*) AS n FROM users WHERE referred_by=?", (uid,)).fetchone()["n"]
+    name = row["first_name"] if row else "کاربر"
+    bot.send_message(chat_id, f"👤 حساب کاربری\n\nنام: {name}\nشناسه: {uid}\nدعوت‌های موفق: {refs}\n\nاز بخش زیر می‌تونی آمار یا لینک دعوتت رو ببینی.", reply_markup=account_keyboard())
+
 
 def show_stats(chat_id, uid):
-    with users_lock:
-        total = len(users)
-        own = users.get(uid, {}).get("referrals", 0)
-        new24 = sum(1 for u in users.values() if u["first_seen"] >= time.time() - 86400)
-    if uid in ADMIN_IDS:
-        text = (
-            "📊 آمار مدیریتی\n\n"
-            f"کل کاربران: {total}\n"
-            f"کاربران جدید ۲۴ ساعت اخیر: {new24}\n"
-            f"کل دعوت‌های موفق: {total_referrals()}\n\n"
-            "این آمار تا وقتی پایگاه داده دائمی اضافه نشود، با راه‌اندازی مجدد پاک می‌شود."
-        )
-    else:
-        text = f"📊 دعوت‌های موفق شما: {own}"
-    bot.send_message(chat_id, text, reply_markup=main_keyboard())
+    with db_conn() as conn:
+        refs = conn.execute("SELECT COUNT(*) AS n FROM users WHERE referred_by=?", (uid,)).fetchone()["n"]
+        if uid in ADMIN_IDS:
+            total = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+            active = conn.execute("SELECT COUNT(*) AS n FROM users WHERE last_seen>=?", (time.time()-86400,)).fetchone()["n"]
+            uses = conn.execute("SELECT COUNT(*) AS n FROM usage").fetchone()["n"]
+            new = conn.execute("SELECT COUNT(*) AS n FROM users WHERE first_seen>=?", (time.time()-86400,)).fetchone()["n"]
+            text = f"📊 آمار هشیوار\n\nکاربران کل: {total}\nکاربران فعال ۲۴ ساعت: {active}\nکاربران جدید ۲۴ ساعت: {new}\nاستفاده ثبت‌شده از ابزارها: {uses}\nدعوت‌های موفق: {conn.execute('SELECT COUNT(*) AS n FROM users WHERE referred_by IS NOT NULL').fetchone()['n']}"
+        else:
+            text = f"📊 دعوت‌های موفق شما: {refs}"
+    bot.send_message(chat_id, text, reply_markup=main_keyboard(uid))
+
 
 def show_invite(chat_id, uid):
-    try:
-        username = bot.get_me().username
-        link = f"https://t.me/{username}?start=ref_{uid}"
-        with users_lock:
-            count = users.get(uid, {}).get("referrals", 0)
-        bot.send_message(
-            chat_id,
-            f"👥 لینک دعوت اختصاصی:\n{link}\n\nدعوت‌های موفق: {count}",
-            reply_markup=main_keyboard()
-        )
-    except Exception:
-        logger.exception("Invite error")
-        generic_error(chat_id)
+    username = bot.get_me().username
+    link = f"https://t.me/{username}?start=ref_{uid}"
+    with db_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM users WHERE referred_by=?", (uid,)).fetchone()["n"]
+    bot.send_message(chat_id, f"👥 لینک دعوت اختصاصی‌ات:\n{link}\n\nدعوت‌های موفق: {count}\n\nهر دعوت واقعی، یک نفر دیگر را با هشیوار آشنا می‌کند. 🌱", reply_markup=main_keyboard(uid))
 
-def show_image_notice(chat_id):
-    if not CF_BASE_URL:
-        bot.send_message(chat_id, "⚠️ سرویس تصویرسازی تنظیم نشده است.", reply_markup=main_keyboard())
-        return
-    set_mode(str(chat_id), "image")
-    bot.send_message(
-        chat_id,
-        "🎨 توضیح تصویرت رو بفرست.\n\n"
-        "بعد از ساخت هم می‌تونی تغییرات رو به زبان طبیعی بگی؛ "
-        "مثلاً «نورش گرم‌تر باشه» یا «پس‌زمینه آبی بشه».\n\n"
-        "برای خروج، «گفتگوی جدید» یا یکی از ابزارهای منو رو انتخاب کن.",
-        reply_markup=main_keyboard()
-    )
 
-def show_translate_notice(chat_id):
-    if not CF_BASE_URL:
-        bot.send_message(chat_id, "⚠️ سرویس ترجمه تنظیم نشده است.", reply_markup=main_keyboard())
-        return
-    set_mode(str(chat_id), "translate")
-    bot.send_message(
-        chat_id,
-        "🌐 متن یا واژه‌ات رو بفرست. زبان مبدأ رو تشخیص می‌دم "
-        "و به فارسی روان ترجمه می‌کنم.\n"
-        "اگر زبان مقصد دیگری می‌خواهی، همان را در پیامت مشخص کن.",
-        reply_markup=main_keyboard()
-    )
+def set_tool(message, mode, title, description):
+    key = user_key(message)
+    set_mode(key, message.from_user.id, message.chat.id, mode)
+    bot.send_message(message.chat.id, f"{title}\n\n{description}", reply_markup=main_keyboard(message.from_user.id))
 
-def show_word_notice(chat_id):
-    set_mode(str(chat_id), "word")
-    bot.send_message(
-        chat_id,
-        "📚 کلمه یا عبارت رو بفرست؛ معنی، کاربرد، مترادف، متضاد "
-        "و مثال رو برات می‌نویسم.",
-        reply_markup=main_keyboard()
-    )
 
-def show_proverb_notice(chat_id):
-    set_mode(str(chat_id), "proverb")
-    bot.send_message(
-        chat_id,
-        "🪶 موضوع یا مفهوم موردنظرت رو بنویس؛ "
-        "ضرب‌المثل‌های واقعی و مرتبط رو همراه معنی می‌گم.",
-        reply_markup=main_keyboard()
-    )
+def select_tool(chat_id, user_id, key, mode):
+    set_mode(key, user_id, chat_id, mode)
+    notices = {
+        "image": ("🎨 وقت جان‌دادن به ایده‌هاست!", "تصویرت رو با جزئیات توصیف کن. بعد از ساخت هم می‌تونی تغییرات رو بگی تا نسخه تازه‌ای بسازم."),
+        "translate": ("🌐 بفرست تا روان و دقیق برگردونمش.", "متن یا واژه رو بفرست؛ زبان مبدأ رو تشخیص می‌دم و به فارسی ترجمه می‌کنم. زبان مقصد دیگری خواستی، در پیام مشخص کن."),
+        "word": ("📚 بریم سراغ ریشه و راز واژه‌ها.", "کلمه یا عبارت رو بفرست تا معنی، کاربرد، مترادف، متضاد و مثال‌های طبیعی رو برات بیارم."),
+        "proverb": ("🪶 برای هر حال و هوایی، یک پند قدیمی پیدا می‌شه.", "موضوع یا مفهوم رو بنویس تا ضرب‌المثل‌های واقعی و معنی‌شون رو پیدا کنم."),
+    }
+    title, desc = notices[mode]
+    bot.send_message(chat_id, f"{title}\n\n{desc}\n\nبرای تغییر ابزار، ابزار دیگری را انتخاب کن؛ من تا آن زمان همین‌جا می‌مانم. 💙", reply_markup=main_keyboard(user_id))
+
 
 def word_request(word):
-    return (
-        "در نقش فرهنگ‌نویس دقیق پاسخ بده. درباره این واژه توضیح بده: "
-        f"{word}\n\nمعنی ساده و دقیق، کاربردها، مترادف‌ها، متضادها، "
-        "ریشه فقط در صورت اطمینان و دو مثال طبیعی ارائه کن. "
-        "اگر واژه چند معنی دارد، آن‌ها را جدا کن و چیزی جعل نکن."
-    )
+    return ("در نقش فرهنگ‌نویس دقیق پاسخ بده. درباره این واژه توضیح بده: " + word +
+            "\nمعنی‌های رایج و دقیق، کاربرد، مترادف، متضاد و دو مثال طبیعی ارائه کن. "
+            "اگر چند معنی دارد جدا کن. ریشه‌شناسی را فقط در صورت اطمینان بگو و چیزی جعل نکن.")
+
 
 def proverb_request(topic):
-    return (
-        f"برای موضوع «{topic}» ضرب‌المثل‌های واقعی و معتبر فارسی پیشنهاد کن. "
-        "برای هرکدام معنی کوتاه بنویس. جمله ابداعی را ضرب‌المثل معرفی نکن؛ "
-        "اگر نمونه معتبر کم است، تعداد کمتری ارائه بده."
-    )
+    return (f"برای موضوع «{topic}» ضرب‌المثل‌های واقعی و معتبر فارسی پیشنهاد کن. "
+            "برای هر مورد معنی و کاربرد کوتاه بنویس. عبارت ابداعی را ضرب‌المثل جا نزن؛ "
+            "اگر نمونه معتبر کم است، فقط همان تعداد را ارائه کن.")
 
 # =====================================================
-# IMAGE TASK CONTINUITY
+# IMAGE TASK: preserve previous prompt and mode
 # =====================================================
-
-def handle_image(chat_id, key, user_text):
+def handle_image(chat_id, uid, key, user_text):
     if not CF_BASE_URL:
-        bot.send_message(chat_id, "⚠️ سرویس تصویرسازی در دسترس نیست.", reply_markup=main_keyboard())
+        bot.send_message(chat_id, "سرویس تصویرسازی فعلاً پیکربندی نشده؛ اما حالت تصویر رو نگه می‌دارم تا بعداً ادامه بدیم.", reply_markup=main_keyboard(uid))
         return
-
-    with active_image_lock:
-        previous = active_image_prompts.get(key, "")
-        if previous:
-            combined = (
-                "Previous image-generation prompt:\n" + previous +
-                "\n\nUser's requested revision:\n" + user_text +
-                "\n\nCreate a new image that preserves all previous requirements "
-                "except where the user explicitly changes them."
-            )
-        else:
-            combined = user_text
-
-    waiting = bot.send_message(chat_id, "🎨 دارم تصویرت رو آماده می‌کنم... ⚡")
+    previous = get_image_prompt(key)
+    if previous:
+        combined = (
+            "Original request (preserve all unchanged details):\n" + previous +
+            "\n\nUser's latest revision:\n" + user_text +
+            "\n\nApply the requested changes only. Keep all other original requirements."
+        )
+    else:
+        combined = user_text
+    waiting = bot.send_message(chat_id, "🎨 دارم جزئیات ایده‌ات رو کنار هم می‌چینم... کمی صبر کن. ⚡")
     deadline = time.monotonic() + IMAGE_WAIT
     try:
-        english = translate_image_prompt(combined, deadline)
-        image_bytes = generate_image(english, deadline)
+        with ai_semaphore:
+            english = translate_image_prompt(combined, deadline)
+            image_bytes = generate_image(english, deadline)
         check_deadline(deadline)
-        with active_image_lock:
-            active_image_prompts[key] = combined
+        set_image_prompt(key, uid, chat_id, combined)
         photo = io.BytesIO(image_bytes)
         photo.name = "hoshivar-image.png"
         try:
             bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-        bot.send_photo(
-            chat_id, photo,
-            caption="✨ تصویر آماده شد. اگر تغییری می‌خواهی، توضیح بده تا نسخه تازه‌ای بسازم. 💙",
-            reply_markup=main_keyboard(),
-            timeout=35
-        )
-        # Keep image mode active for follow-up refinements.
-        set_mode(key, "image")
+        bot.send_photo(chat_id, photo, caption="آماده شد! ✨ اگر بخشی رو می‌خوای عوض کنیم، فقط بگو؛ جزئیات قبلی یادم هست. 💙", reply_markup=main_keyboard(uid), timeout=40)
+        log_usage(uid, "image")
     except Exception:
         logger.exception("Image generation failed")
         try:
             bot.delete_message(chat_id, waiting.message_id)
         except Exception:
             pass
-        bot.send_message(
-            chat_id,
-            "⚠️ ساخت تصویر انجام نشد. اگر خواستی دوباره تلاش کن؛ "
-            "زمینه درخواستت حفظ شده است.",
-            reply_markup=main_keyboard()
-        )
-        set_mode(key, "image")
+        bot.send_message(chat_id, "این بار تصویر آماده نشد؛ گاهی سرویس کمی بدقلقی می‌کنه. درخواستت رو نگه داشتم، می‌تونی دوباره تلاش کنی.", reply_markup=main_keyboard(uid))
+    finally:
+        set_mode(key, uid, chat_id, "image")
+
+# =====================================================
+# ADMIN PANEL (restricted to ADMIN_IDS)
+# =====================================================
+def admin_only(uid):
+    return uid in ADMIN_IDS
+
+
+def show_admin(chat_id, uid):
+    if not admin_only(uid):
+        return
+    bot.send_message(chat_id, "🛠 پنل مدیریت هشیوار\n\nابزارهای نظارت و کنترل پایه در دسترس‌اند.", reply_markup=admin_keyboard())
+
+
+def admin_stats(chat_id, uid):
+    if not admin_only(uid):
+        return
+    with db_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+        blocked = conn.execute("SELECT COUNT(*) n FROM users WHERE is_blocked=1").fetchone()["n"]
+        daily = conn.execute("SELECT COUNT(*) n FROM users WHERE last_seen>=?", (time.time()-86400,)).fetchone()["n"]
+        by_tool = conn.execute("SELECT tool,COUNT(*) n FROM usage WHERE created_at>=? GROUP BY tool ORDER BY n DESC", (time.time()-86400,)).fetchall()
+    details = "\n".join(f"• {r['tool']}: {r['n']}" for r in by_tool) or "هنوز آماری ثبت نشده."
+    bot.send_message(chat_id, f"📊 گزارش مدیریتی\n\nکل کاربران: {total}\nفعال ۲۴ ساعت: {daily}\nمسدود: {blocked}\n\nاستفاده ابزارها در ۲۴ ساعت:\n{details}", reply_markup=admin_keyboard())
+
+
+def admin_health(chat_id, uid):
+    if not admin_only(uid):
+        return
+    cf = "فعال" if CF_BASE_URL else "تنظیم نشده"
+    bot.send_message(chat_id, f"🩺 وضعیت پیکربندی\n\nربات: فعال\n1xAI: تنظیم شده\nCloudflare: {cf}\nپایگاه داده: {DB_PATH}\nمدل متنی: {X1_MODEL}", reply_markup=admin_keyboard())
+
+
+def toggle_maintenance(chat_id, uid):
+    if not admin_only(uid):
+        return
+    new_state = not is_maintenance()
+    set_maintenance(new_state)
+    status = "روشن شد؛ فقط مدیران می‌توانند از ربات استفاده کنند." if new_state else "خاموش شد؛ ربات دوباره برای همه در دسترس است."
+    bot.send_message(chat_id, "🔧 حالت تعمیرات " + status, reply_markup=admin_keyboard())
 
 # =====================================================
 # COMMANDS
 # =====================================================
-
 @bot.message_handler(commands=["start"])
 def start(message):
-    key = str(message.chat.id)
-    clear_task(key)
-    clear_history(key)
     referral = None
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) > 1 and parts[1].startswith("ref_"):
@@ -685,19 +782,30 @@ def start(message):
         except ValueError:
             pass
     register_user(message.from_user, referral)
-    send_home(message.chat.id)
+    send_home(message.chat.id, message.from_user.id)
+
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
     register_user(message.from_user)
-    show_help(message.chat.id)
+    show_help(message.chat.id, message.from_user.id)
+
+
+@bot.message_handler(commands=["new"])
+def new_command(message):
+    key = user_key(message)
+    clear_history(key)
+    clear_task(key, message.from_user.id, message.chat.id)
+    bot.send_message(message.chat.id, "یک صفحه تازه؛ ذهن رو از نو مرتب می‌کنیم. 🌱", reply_markup=main_keyboard(message.from_user.id))
+
 
 @bot.message_handler(commands=["reset"])
 def reset_command(message):
-    key = str(message.chat.id)
+    key = user_key(message)
     clear_history(key)
-    clear_task(key)
-    bot.send_message(message.chat.id, "🧹 حافظه و کار فعال پاک شد.", reply_markup=main_keyboard())
+    clear_task(key, message.from_user.id, message.chat.id)
+    bot.send_message(message.chat.id, "حافظه همین گفت‌وگو و کار فعال پاک شد.", reply_markup=main_keyboard(message.from_user.id))
+
 
 @bot.message_handler(commands=["stats"])
 def stats_command(message):
@@ -707,178 +815,180 @@ def stats_command(message):
 # =====================================================
 # CALLBACKS
 # =====================================================
-
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
-        bot.answer_callback_query(call.id)
+        if not (call.data or "").startswith("tools_coming_"):
+            bot.answer_callback_query(call.id)
     except Exception:
         pass
     try:
-        chat_id = call.message.chat.id
-        key = str(chat_id)
-        action = call.data
+        chat_id, uid, action = call.message.chat.id, call.from_user.id, call.data
+        key = user_key(call)
         register_user(call.from_user)
-
-        if action in ("home", "new_chat"):
-            clear_task(key)
-            if action == "new_chat":
-                clear_history(key)
-            send_home(chat_id)
-        elif action == "help":
-            show_help(chat_id)
-        elif action == "about":
-            show_about(chat_id)
-        elif action == "settings":
-            show_settings(chat_id)
-        elif action == "account":
-            bot.send_message(
-                chat_id,
-                f"👤 حساب کاربری\n\nشناسه: {call.from_user.id}\nنام: {call.from_user.first_name or 'کاربر'}",
-                reply_markup=main_keyboard()
-            )
-        elif action == "image":
-            show_image_notice(chat_id)
-        elif action == "translate":
-            show_translate_notice(chat_id)
-        elif action == "word":
-            show_word_notice(chat_id)
-        elif action == "proverb":
-            show_proverb_notice(chat_id)
-        elif action == "invite":
-            show_invite(chat_id, call.from_user.id)
-        elif action == "stats":
-            show_stats(chat_id, call.from_user.id)
+        if action == "new_chat":
+            clear_history(key)
+            clear_task(key, uid, chat_id)
+            bot.send_message(chat_id, "خب، یک شروع تازه! هر فکری داری از همین‌جا بازش می‌کنیم. 🌱", reply_markup=main_keyboard(uid))
+        elif action == "home":
+            # Showing the menu does not change the active tool.
+            bot.send_message(chat_id, "منو اینجاست؛ ابزار فعلی‌ات هم سر جاشه. 💙", reply_markup=main_keyboard(uid))
+            bot.send_message(chat_id, "ابزار دیگری خواستی انتخاب کن:", reply_markup=inline_keyboard(uid))
+        elif action == "help": show_help(chat_id, uid)
+        elif action == "about": show_about(chat_id, uid)
+        elif action == "settings": show_settings(chat_id)
+        elif action == "account": show_account(chat_id, uid)
+        elif action == "tools":
+            bot.send_message(chat_id, "🧰 ابزارهای هشیوار\n\nهر دسته رو باز کن تا ابزارهای مربوط به خودش رو ببینی.", reply_markup=tools_keyboard())
+        elif action == "tools_language":
+            bot.send_message(chat_id, "🌐 ابزارهای زبانی\n\nبرای ترجمه، شناخت واژه‌ها و پیدا کردن ضرب‌المثل‌ها آماده‌ام.", reply_markup=language_tools_keyboard())
+        elif action == "tools_creative":
+            bot.send_message(chat_id, "🎨 تصویر و خلاقیت\n\nایده‌ات رو توصیف کن تا به تصویر تبدیلش کنیم.", reply_markup=creative_tools_keyboard())
+        elif action in ("tools_coming_files", "tools_coming_audio", "tools_coming_research"):
+            bot.answer_callback_query(call.id, "این بخش هنوز آماده استفاده نیست؛ به‌محض تکمیل فعالش می‌کنیم.", show_alert=True)
+        elif action in ("image", "translate", "word", "proverb"):
+            select_tool(chat_id, uid, key, action)
+        elif action == "invite": show_invite(chat_id, uid)
+        elif action == "stats": show_stats(chat_id, uid)
         elif action == "reset_memory":
             clear_history(key)
-            clear_task(key)
-            bot.send_message(chat_id, "🧹 حافظه پاک شد.", reply_markup=main_keyboard())
+            bot.send_message(chat_id, "تاریخچه همین گفت‌وگو پاک شد؛ ابزار انتخاب‌شده را نگه داشتم. 💙", reply_markup=main_keyboard(uid))
+        elif action == "admin": show_admin(chat_id, uid)
+        elif action == "admin_stats": admin_stats(chat_id, uid)
+        elif action == "admin_health": admin_health(chat_id, uid)
+        elif action == "admin_maintenance": toggle_maintenance(chat_id, uid)
     except Exception:
-        logger.exception("Callback handler failed")
+        logger.exception("Callback failed")
 
 # =====================================================
 # TEXT HANDLER
 # =====================================================
-
 @bot.message_handler(content_types=["text"])
 def handle_text(message):
-    chat_id = message.chat.id
-    key = str(chat_id)
+    chat_id, uid = message.chat.id, message.from_user.id
+    key = user_key(message)
     text = (message.text or "").strip()
     if not text:
         return
-
     register_user(message.from_user)
+    if touch_user(message.from_user):
+        bot.send_message(chat_id, "دسترسی این حساب به ربات محدود شده است.")
+        return
+    if is_maintenance() and uid not in ADMIN_IDS:
+        bot.send_message(chat_id, "هشیوار فعلاً در حال رسیدگی و مرتب‌کردن اوضاعه. کمی بعد برگرد؛ زود می‌بینیمت. 🌱")
+        return
 
-    # Main keyboard actions explicitly switch/cancel active tasks.
+    # Explicit menu actions only. The menu-display action preserves current mode.
+    if text == BTN_MENU:
+        bot.send_message(chat_id, "منو حاضر شد؛ کار قبلی‌ات همچنان فعاله. 💙", reply_markup=main_keyboard(uid))
+        bot.send_message(chat_id, "برای انتخاب بخش موردنظرت:", reply_markup=inline_keyboard(uid))
+        return
+    if text == BTN_TOOLS:
+        bot.send_message(chat_id, "🧰 ابزارهای هشیوار\n\nهر دسته رو باز کن تا ابزارهای مربوط به خودش رو ببینی.", reply_markup=tools_keyboard())
+        return
     if text == BTN_CHAT:
-        clear_task(key)
         clear_history(key)
-        bot.send_message(chat_id, "💬 گفتگوی تازه شروع شد.", reply_markup=main_keyboard())
+        clear_task(key, uid, chat_id)
+        bot.send_message(chat_id, "خب، بریم سراغ یک شروع تازه! این بار از کجا شروع کنیم؟ 🌱", reply_markup=main_keyboard(uid))
         return
     if text == BTN_IMAGE:
-        show_image_notice(chat_id)
-        return
+        select_tool(chat_id, uid, key, "image"); return
     if text == BTN_TRANSLATE:
-        clear_task(key)
-        show_translate_notice(chat_id)
-        return
+        select_tool(chat_id, uid, key, "translate"); return
     if text == BTN_WORD:
-        clear_task(key)
-        show_word_notice(chat_id)
-        return
+        select_tool(chat_id, uid, key, "word"); return
     if text == BTN_PROVERB:
-        clear_task(key)
-        show_proverb_notice(chat_id)
-        return
+        select_tool(chat_id, uid, key, "proverb"); return
     if text == BTN_ACCOUNT:
-        clear_task(key)
-        show_account(message)
-        return
+        show_account(chat_id, uid); return
     if text == BTN_STATS:
-        clear_task(key)
-        show_stats(chat_id, message.from_user.id)
-        return
+        show_stats(chat_id, uid); return
     if text == BTN_INVITE:
-        clear_task(key)
-        show_invite(chat_id, message.from_user.id)
-        return
+        show_invite(chat_id, uid); return
     if text == BTN_HELP:
-        clear_task(key)
-        show_help(chat_id)
-        return
+        show_help(chat_id, uid); return
     if text == BTN_SETTINGS:
-        clear_task(key)
-        show_settings(chat_id)
+        show_settings(chat_id); return
+
+    # Long-term profile memory is opt-in: save only when the user explicitly asks.
+    remember_prefixes = ("یادت باشه", "به خاطر بسپار", "این رو به خاطر بسپار", "این را به خاطر بسپار")
+    matched_prefix = next((prefix for prefix in remember_prefixes if text.startswith(prefix)), None)
+    if matched_prefix:
+        item = text[len(matched_prefix):].lstrip(" :،؛")
+        if item:
+            add_profile_memory(uid, item)
+            bot.send_message(chat_id, "حتماً؛ این نکته رو برای گفتگوهای بعدی نگه می‌دارم. هر وقت خواستی می‌تونی ببینی یا پاکش کنی. 💙", reply_markup=main_keyboard(uid))
+        else:
+            bot.send_message(chat_id, "حتماً؛ فقط بگو دقیقاً چه چیزی رو به خاطر بسپارم؟", reply_markup=main_keyboard(uid))
+        return
+    if text.startswith("فراموش کن"):
+        phrase = text[len("فراموش کن"):].strip(" :،؛ ")
+        if phrase:
+            delete_profile_memory(uid, phrase)
+            bot.send_message(chat_id, "اگر موردی با این عبارت ثبت شده بود، از حافظه بلندمدتت حذف شد. 🌱", reply_markup=main_keyboard(uid))
+        else:
+            bot.send_message(chat_id, "برای حذف یک مورد، بعد از «فراموش کن» بخشی از همان مورد رو بنویس.", reply_markup=main_keyboard(uid))
+        return
+    if text in ("همه حافظه‌ام رو پاک کن", "تمام حافظه‌ام را پاک کن", "پاک کن همه حافظه‌ام"):
+        delete_profile_memory(uid)
+        clear_history(key)
+        bot.send_message(chat_id, "حافظه بلندمدت و تاریخچه همین گفتگو پاک شد. 💙", reply_markup=main_keyboard(uid))
+        return
+    if text in ("حافظه من", "حافظه‌ام", "حافظه من رو نشون بده", "/memory"):
+        show_profile_memory(chat_id, uid)
         return
 
     mode = get_mode(key)
-
     if mode == "image":
-        handle_image(chat_id, key, text)
+        handle_image(chat_id, uid, key, text)
         return
 
-    if mode == "translate":
-        clear_mode(key)
-        waiting = bot.send_message(chat_id, "🌐 در حال ترجمه...")
-        try:
-            with ai_semaphore:
-                result = translate_text(text, time.monotonic() + MAX_WAIT)
-            try:
-                bot.delete_message(chat_id, waiting.message_id)
-            except Exception:
-                pass
-            send_long(chat_id, "🌐 ترجمه:\n\n" + result)
-        except Exception:
-            logger.exception("Translation failed")
-            try:
-                bot.delete_message(chat_id, waiting.message_id)
-            except Exception:
-                pass
-            generic_error(chat_id)
-        return
-
-    if mode == "word":
-        clear_mode(key)
-        text = word_request(text)
-    elif mode == "proverb":
-        clear_mode(key)
-        text = proverb_request(text)
-
+    waiting = None
     try:
-        waiting = bot.send_message(chat_id, "🧠 هشیوار در حال فکر کردنه... ⚡")
-    except Exception:
-        logger.exception("Unable to send waiting message")
-        return
-
-    deadline = time.monotonic() + MAX_WAIT
-    try:
-        with chat_lock(key):
+        if mode == "translate":
+            waiting = bot.send_message(chat_id, "🌐 دارم ترجمه‌اش می‌کنم؛ حواسم به لحن و معنی هم هست...")
+            log_usage(uid, "translate")
             with ai_semaphore:
-                answer = ask_ai(text, key, deadline)
-        try:
-            bot.delete_message(chat_id, waiting.message_id)
-        except Exception:
-            pass
-        send_long(chat_id, answer)
+                answer = translate_text(text, time.monotonic() + MAX_WAIT)
+            output = "🌐 ترجمه:\n\n" + answer
+        elif mode == "word":
+            waiting = bot.send_message(chat_id, "📚 بذار معنی دقیقش رو از چند زاویه بررسی کنم...")
+            log_usage(uid, "dictionary")
+            with lock_for(key), ai_semaphore:
+                answer = ask_ai(word_request(text), key, time.monotonic() + MAX_WAIT, uid)
+            output = answer
+        elif mode == "proverb":
+            waiting = bot.send_message(chat_id, "🪶 دنبال نمونه‌های درست و مرتبط می‌گردم...")
+            log_usage(uid, "proverb")
+            with lock_for(key), ai_semaphore:
+                answer = ask_ai(proverb_request(text), key, time.monotonic() + MAX_WAIT, uid)
+            output = answer
+        else:
+            waiting = bot.send_message(chat_id, "🧠 بذار یک لحظه روش فکر کنم...")
+            log_usage(uid, "chat")
+            with lock_for(key), ai_semaphore:
+                answer = ask_ai(text, key, time.monotonic() + MAX_WAIT, uid)
+            output = answer
+        if waiting:
+            try: bot.delete_message(chat_id, waiting.message_id)
+            except Exception: pass
+        send_long(chat_id, output, uid)
+        # Intentionally do not clear mode after success. It remains active until
+        # the user explicitly selects another tool or starts a new chat.
     except Exception:
-        logger.exception("AI request failed")
-        try:
-            bot.delete_message(chat_id, waiting.message_id)
-        except Exception:
-            pass
-        generic_error(chat_id)
+        logger.exception("Message processing failed")
+        if waiting:
+            try: bot.delete_message(chat_id, waiting.message_id)
+            except Exception: pass
+        bot.send_message(chat_id, "این بار پاسخ کامل نشد؛ گاهی مسیر ارتباطی کمی ناز می‌کنه. دوباره امتحان کن، ابزار انتخاب‌شده‌ات همچنان فعاله. 💙", reply_markup=main_keyboard(uid))
 
 # =====================================================
 # WEBHOOK SERVER
 # =====================================================
-
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         if self.path in ("/", "/health"):
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
         else:
             self.send_error(404)
 
@@ -888,56 +998,42 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.end_headers(); self.wfile.write(body)
         else:
             self.send_error(404)
 
     def do_POST(self):
         if self.path != WEBHOOK_PATH:
-            self.send_error(404)
-            return
+            self.send_error(404); return
         if self.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-            self.send_error(403)
-            return
+            self.send_error(403); return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 1_000_000:
-                self.send_error(400)
-                return
+                self.send_error(400); return
             raw = self.rfile.read(length)
             update = telebot.types.Update.de_json(raw.decode("utf-8"))
             bot.process_new_updates([update])
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
+            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
         except Exception:
             logger.exception("Webhook update failed")
             self.send_error(500)
 
     def log_message(self, fmt, *args):
-        logger.info("WEBHOOK: %s", fmt % args)
+        logger.info("WEBHOOK: " + fmt, *args)
 
 # =====================================================
 # START
 # =====================================================
-
 if __name__ == "__main__":
-    logger.info("Starting Hoshivar AI")
-    logger.info("Primary text model: 1xAI / %s", X1_MODEL)
-    logger.info("Cloudflare configured: %s", bool(CF_BASE_URL))
-    logger.info("Concurrent AI limit: %s", MAX_CONCURRENT_AI)
-
+    init_db()
+    logger.info("Starting Hoshivar | primary=1xAI/%s | cloudflare=%s", X1_MODEL, bool(CF_BASE_URL))
+    logger.info("SQLite database: %s", DB_PATH)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), WebhookHandler)
     server.daemon_threads = True
-
     try:
-        result = bot.set_webhook(
-            url=WEBHOOK_URL,
-            secret_token=WEBHOOK_SECRET,
-            allowed_updates=["message", "callback_query"],
-        )
-        if not result:
+        ok = bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET, allowed_updates=["message", "callback_query"])
+        if not ok:
             raise RuntimeError("Telegram webhook setup failed")
         logger.info("Webhook configured; Hoshivar is live")
         server.serve_forever()
