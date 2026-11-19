@@ -94,7 +94,8 @@ SYSTEM_PROMPT = r"""
 - به جای تعارف‌های تکراری، واکنش متناسب و تازه نشان بده. لازم نیست هر پاسخ را با پیشنهاد یا جمله احساسی تمام کنی.
 - اگر کاربر تشکر کرد، طبیعی و کوتاه جواب بده. اگر فقط سلام کرد، گرم و سرزنده پاسخ بده و راه شروع گفتگو را باز بگذار.
 - پاسخ‌های ساده را ساده و کوتاه نگه دار؛ موضوعات پیچیده را کامل، روشن و مرحله‌بندی‌شده توضیح بده.
-- از ایموجی کم اما بجا استفاده کن؛ 💙 و 🌱 در موقعیت مناسب مجازند.
+- در پاسخ‌های تولیدشده از ایموجی متناسب با موضوع و حال‌وهوای گفتگو استفاده کن؛ نه اجباری و نه بیش‌ازحد.
+- در متن‌های ثابت منو و راهنما ممکن است ایموجی‌های متنوع و شاد بیشتری ببینی؛ اما پاسخ عادی باید خوانا و متناسب بماند.
 
 دقت و صداقت:
 - حقیقت و دقت را به موافقت بی‌دلیل ترجیح بده. اشتباه کاربر را محترمانه و روشن اصلاح کن.
@@ -350,81 +351,66 @@ def set_maintenance(enabled):
         )
 
 # =====================================================
-# TELEGRAM MENU: ONE CLEAN HOME PAGE, TOOLS IN SUBMENUS
+# TELEGRAM MENU: SIMPLE HOME + DIRECT TOOL LIST
 # =====================================================
 BTN_CHAT = "💬 گفتگوی جدید"
 BTN_TOOLS = "🧰 ابزارها"
 BTN_ACCOUNT = "👤 حساب کاربری"
+BTN_INVITE = "🎁 دعوت دوستان"
 BTN_SETTINGS = "⚙️ تنظیمات"
 BTN_HELP = "ℹ️ راهنما"
 BTN_MENU = "🏠 منوی اصلی"
 
-# Tool names are intentionally kept as internal menu labels, not crowded
-# onto the persistent home keyboard.
-BTN_IMAGE = "🎨 ساخت تصویر"
-BTN_TRANSLATE = "🌐 ترجمه"
-BTN_WORD = "📚 معنی کلمات"
-BTN_PROVERB = "🪶 ضرب‌المثل‌یاب"
+# Hoshivar's named tools
+BTN_IMAGE = "🎨 خیال‌نگار"
+BTN_TRANSLATE = "🌍 زبان‌یار"
+BTN_WORD = "📖 واژه‌کاو"
+BTN_PROVERB = "📜 مثل‌دان"
+BTN_STORY = "🪄 قصه‌پرداز"
+BTN_TEXT = "✍️ متن‌آرا"
 BTN_STATS = "📊 آمار ربات"
-BTN_INVITE = "👥 دعوت دوستان"
 
 
 def main_keyboard(uid=None):
-    """Compact persistent home navigation."""
+    """Persistent home navigation. Invite is directly accessible here."""
     k = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2, is_persistent=True)
     k.row(KeyboardButton(BTN_CHAT), KeyboardButton(BTN_TOOLS))
-    k.row(KeyboardButton(BTN_ACCOUNT), KeyboardButton(BTN_SETTINGS))
-    k.row(KeyboardButton(BTN_HELP))
+    k.row(KeyboardButton(BTN_ACCOUNT), KeyboardButton(BTN_INVITE))
+    k.row(KeyboardButton(BTN_SETTINGS), KeyboardButton(BTN_HELP))
     return k
 
 
 def inline_keyboard(uid=None):
-    """Home page actions; detailed tools live one level deeper."""
     k = InlineKeyboardMarkup(row_width=2)
-    k.row(InlineKeyboardButton("💬 گفتگوی هوشمند", callback_data="new_chat"))
-    k.row(InlineKeyboardButton("🧰 ورود به ابزارها", callback_data="tools"))
+    k.row(InlineKeyboardButton("🧠 هم‌فکر | گفتگوی هوشمند", callback_data="new_chat"))
+    k.row(InlineKeyboardButton("🧰 جعبه‌ابزار هشیوار", callback_data="tools"))
     k.row(InlineKeyboardButton("👤 حساب کاربری", callback_data="account"),
-          InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings"))
-    k.row(InlineKeyboardButton("ℹ️ راهنما", callback_data="help"),
-          InlineKeyboardButton("💙 درباره هشیوار", callback_data="about"))
+          InlineKeyboardButton("🎁 دعوت دوستان", callback_data="invite"))
+    k.row(InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings"),
+          InlineKeyboardButton("ℹ️ راهنما", callback_data="help"))
+    k.row(InlineKeyboardButton("💙 درباره هشیوار", callback_data="about"))
     if uid in ADMIN_IDS:
-        k.row(InlineKeyboardButton("🛠 پنل مدیریت", callback_data="admin"))
+        k.row(InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin"))
     return k
 
 
 def tools_keyboard():
+    """Show only implemented tools; no placeholder or unavailable features."""
     k = InlineKeyboardMarkup(row_width=2)
-    k.row(InlineKeyboardButton("🌐 ابزارهای زبانی", callback_data="tools_language"))
-    k.row(InlineKeyboardButton("🎨 تصویر و خلاقیت", callback_data="tools_creative"))
-    # These categories are visible as planned sections, but are not falsely
-    # advertised as working until their handlers/providers are implemented.
-    k.row(InlineKeyboardButton("📄 فایل و اسناد · به‌زودی", callback_data="tools_coming_files"))
-    k.row(InlineKeyboardButton("🎙 ابزارهای صوتی · به‌زودی", callback_data="tools_coming_audio"))
-    k.row(InlineKeyboardButton("🔎 جست‌وجو و پژوهش · به‌زودی", callback_data="tools_coming_research"))
+    k.row(InlineKeyboardButton("🌍 زبان‌یار", callback_data="translate"),
+          InlineKeyboardButton("📖 واژه‌کاو", callback_data="word"))
+    k.row(InlineKeyboardButton("📜 مثل‌دان", callback_data="proverb"),
+          InlineKeyboardButton("🎨 خیال‌نگار", callback_data="image"))
+    k.row(InlineKeyboardButton("🪄 قصه‌پرداز", callback_data="story"),
+          InlineKeyboardButton("✍️ متن‌آرا", callback_data="textcraft"))
     k.row(InlineKeyboardButton("🏠 صفحه اصلی", callback_data="home"))
-    return k
-
-
-def language_tools_keyboard():
-    k = InlineKeyboardMarkup(row_width=2)
-    k.row(InlineKeyboardButton("🌐 ترجمه", callback_data="translate"),
-          InlineKeyboardButton("📚 معنی کلمات", callback_data="word"))
-    k.row(InlineKeyboardButton("🪶 ضرب‌المثل‌یاب", callback_data="proverb"))
-    k.row(InlineKeyboardButton("🔙 بازگشت به ابزارها", callback_data="tools"))
-    return k
-
-
-def creative_tools_keyboard():
-    k = InlineKeyboardMarkup(row_width=2)
-    k.row(InlineKeyboardButton("🎨 ساخت تصویر", callback_data="image"))
-    k.row(InlineKeyboardButton("🔙 بازگشت به ابزارها", callback_data="tools"))
     return k
 
 
 def account_keyboard():
     k = InlineKeyboardMarkup(row_width=2)
     k.row(InlineKeyboardButton("📊 آمار و فعالیت", callback_data="stats"),
-          InlineKeyboardButton("👥 دعوت دوستان", callback_data="invite"))
+          InlineKeyboardButton("🎁 دعوت دوستان", callback_data="invite"))
     k.row(InlineKeyboardButton("🏠 صفحه اصلی", callback_data="home"))
     return k
 
@@ -447,12 +433,15 @@ def admin_keyboard():
 def send_home(chat_id, uid):
     bot.send_message(
         chat_id,
-        "سلام، خوش اومدی به هشیوار! 💙\n\n"
-        "اینجا می‌تونیم فکرها رو مرتب کنیم، چیزهای تازه یاد بگیریم و ایده‌هات رو جان بدیم.\n"
-        "هر راهی رو خواستی انتخاب کن؛ من هم‌قدمتم. 🌱",
+        "💙💚🤍 به هشیوار خوش اومدی! ✨\n\n"
+        "🧠 خرد رهنمای و خرد دلگشای\n"
+        "خرد دست گیرد به هر دو سرای\n"
+        "📜 حکیم ابوالقاسم فردوسی\n\n"
+        "من هشیوارم؛ همراهت برای فکر کردن، یاد گرفتن و ساختن چیزهای تازه. 🌱\n"
+        "⚡ از گفت‌وگوی تازه شروع کن یا سری به جعبه‌ابزارم بزن! 🪄",
         reply_markup=main_keyboard(uid),
     )
-    bot.send_message(chat_id, "از اینجا شروع کنیم:", reply_markup=inline_keyboard(uid))
+    bot.send_message(chat_id, "🌈 از کجا شروع کنیم؟", reply_markup=inline_keyboard(uid))
 
 # =====================================================
 # PROVIDERS
@@ -608,18 +597,27 @@ def send_long(chat_id, text, uid=None):
 
 def show_help(chat_id, uid):
     bot.send_message(chat_id,
-        "راهنمای هشیوار 🌱\n\n"
-        "💬 گفتگوی جدید: شروع یک مکالمه تازه\n"
-        "🧰 ابزارها: دسته‌بندی ابزارهای زبانی و تصویری\n"
-        "👤 حساب کاربری: آمار شخصی و دعوت دوستان\n"
-        "⚙️ تنظیمات: مدیریت حافظه و تنظیمات گفتگو\n"
-        "ℹ️ راهنما: آشنایی با امکانات هشیوار\n\n"
-        "با بازکردن منو، ابزار فعال عوض نمی‌شود. ابزار انتخاب‌شده تا وقتی ابزار دیگری را انتخاب نکنی یا گفتگوی جدید نزنی، فعال می‌ماند.", reply_markup=main_keyboard(uid))
+        "🌈 راهنمای کوچولوی هشیوار 💙💚🤍\n\n"
+        "💬 گفتگوی جدید: برای شروع یک مکالمه تازه؛ هر موضوعی داری همین‌جا بپرس.\n"
+        "🧰 ابزارها: جعبه‌ابزار هشیوار؛ هر ابزار را انتخاب کن و راهنمای نمونه‌دارش را ببین.\n"
+        "👤 حساب کاربری: دیدن اطلاعات و آمار فعالیتت.\n"
+        "🎁 دعوت دوستان: لینک اختصاصی‌ات را بگیر و هشیوار را به دوستانت معرفی کن.\n"
+        "⚙️ تنظیمات: مدیریت حافظه همین گفتگو.\n"
+        "ℹ️ راهنما: همین راهنمای استفاده.\n\n"
+        "✨ ابزارها چطور کار می‌کنند؟\n"
+        "🌍 زبان‌یار: متن را بفرست و زبان مقصد را مشخص کن؛ مثلاً «این متن رو به انگلیسی ترجمه کن».\n"
+        "📖 واژه‌کاو: یک واژه بفرست؛ مثلاً «معنی، مترادف و متضاد واژه دانایی رو بگو».\n"
+        "📜 مثل‌دان: موضوع را بنویس؛ مثلاً «برای صبر و شکیبایی چند ضرب‌المثل بگو».\n"
+        "🎨 خیال‌نگار: تصویر دلخواهت را توصیف کن؛ مثلاً «یک گربه سفید بامزه زیر آسمان پرستاره بساز».\n"
+        "🪄 قصه‌پرداز: موضوع یا شخصیت‌ها را بگو؛ مثلاً «یک قصه کوتاه درباره دوستی یک روباه و پرنده بنویس».\n"
+        "✍️ متن‌آرا: متن را بفرست و تغییر دلخواهت را بگو؛ مثلاً «این پیام رو صمیمی‌تر و روان‌تر کن».\n\n"
+        "💡 نکته: ابزار انتخاب‌شده فعال می‌ماند تا خودت ابزار دیگری انتخاب کنی یا گفتگوی جدید بزنی. بازکردن منو، حساب یا راهنما حالت ابزار را تغییر نمی‌دهد. 💚",
+        reply_markup=main_keyboard(uid))
 
 
 def show_about(chat_id, uid):
     bot.send_message(chat_id,
-        "هشیوار؛ همراهی برای فکرهای بزرگ و سؤال‌های کوچک. 💙\n\n"
+        "💙💚🤍 هشیوار؛ همراهی برای فکرهای بزرگ و سؤال‌های کوچک! ✨\n\n"
         "قرار است دقیق باشد، اما خشک نه؛ خردمند باشد، اما نصیحت‌گر نه؛ "
         "خوش‌صحبت باشد، اما پرحرف نه.", reply_markup=main_keyboard(uid))
 
@@ -633,7 +631,7 @@ def show_account(chat_id, uid):
         row = conn.execute("SELECT first_name,username,first_seen FROM users WHERE user_id=?", (uid,)).fetchone()
         refs = conn.execute("SELECT COUNT(*) AS n FROM users WHERE referred_by=?", (uid,)).fetchone()["n"]
     name = row["first_name"] if row else "کاربر"
-    bot.send_message(chat_id, f"👤 حساب کاربری\n\nنام: {name}\nشناسه: {uid}\nدعوت‌های موفق: {refs}\n\nاز بخش زیر می‌تونی آمار یا لینک دعوتت رو ببینی.", reply_markup=account_keyboard())
+    bot.send_message(chat_id, f"👤 حساب کاربری\n\nنام: {name}\nشناسه: {uid}\nدعوت‌های موفق: {refs}\n\n🎁 لینک دعوتت همیشه از صفحه اصلی هم در دسترسه؛ از بخش زیر آمار فعالیتت رو ببین.", reply_markup=account_keyboard())
 
 
 def show_stats(chat_id, uid):
@@ -655,7 +653,7 @@ def show_invite(chat_id, uid):
     link = f"https://t.me/{username}?start=ref_{uid}"
     with db_conn() as conn:
         count = conn.execute("SELECT COUNT(*) AS n FROM users WHERE referred_by=?", (uid,)).fetchone()["n"]
-    bot.send_message(chat_id, f"👥 لینک دعوت اختصاصی‌ات:\n{link}\n\nدعوت‌های موفق: {count}\n\nهر دعوت واقعی، یک نفر دیگر را با هشیوار آشنا می‌کند. 🌱", reply_markup=main_keyboard(uid))
+    bot.send_message(chat_id, f"🎁 لینک دعوت اختصاصی تو:\n{link}\n\nدعوت‌های موفق: {count}\n\nهر دعوت واقعی، یک دوست تازه رو با هشیوار آشنا می‌کنه! 💚🤍✨", reply_markup=main_keyboard(uid))
 
 
 def set_tool(message, mode, title, description):
@@ -667,13 +665,15 @@ def set_tool(message, mode, title, description):
 def select_tool(chat_id, user_id, key, mode):
     set_mode(key, user_id, chat_id, mode)
     notices = {
-        "image": ("🎨 وقت جان‌دادن به ایده‌هاست!", "تصویرت رو با جزئیات توصیف کن. بعد از ساخت هم می‌تونی تغییرات رو بگی تا نسخه تازه‌ای بسازم."),
-        "translate": ("🌐 بفرست تا روان و دقیق برگردونمش.", "متن یا واژه رو بفرست؛ زبان مبدأ رو تشخیص می‌دم و به فارسی ترجمه می‌کنم. زبان مقصد دیگری خواستی، در پیام مشخص کن."),
-        "word": ("📚 بریم سراغ ریشه و راز واژه‌ها.", "کلمه یا عبارت رو بفرست تا معنی، کاربرد، مترادف، متضاد و مثال‌های طبیعی رو برات بیارم."),
-        "proverb": ("🪶 برای هر حال و هوایی، یک پند قدیمی پیدا می‌شه.", "موضوع یا مفهوم رو بنویس تا ضرب‌المثل‌های واقعی و معنی‌شون رو پیدا کنم."),
+        "image": ("🎨 خیال‌نگار؛ وقت جان‌دادن به ایده‌هاست! ✨", "🖼️ چیزی رو که می‌خوای ببینی توصیف کن.\nمثلاً: «یک کلبه چوبی کنار دریا، هنگام غروب، با نور گرم و سبک واقع‌گرایانه بساز.»\n💡 هر تغییری خواستی بعد از ساخت بگو؛ جزئیات قبلی رو نگه می‌دارم."),
+        "translate": ("🌍 زبان‌یار؛ پلی بین زبان‌ها! 💚", "📝 متن رو بفرست و اگر زبان مقصد رو می‌دونی مشخص کن.\nمثلاً: «این جمله رو به انگلیسی ترجمه کن: از آشنایی با تو خوشحالم.»\n✨ اگر مقصد رو نگفتی، معمولاً به فارسی ترجمه می‌کنم."),
+        "word": ("📖 واژه‌کاو؛ بریم سراغ راز واژه‌ها! 🤍", "🔎 کلمه یا عبارت رو بفرست تا معنی، کاربرد، مترادف، متضاد و مثال‌هاش رو بگم.\nمثلاً: «معنی واژه خردمند چیه؟ دو مترادف و یک مثال هم بزن.»"),
+        "proverb": ("📜 مثل‌دان؛ برای هر حال‌وهوا، یک مثل! 🌱", "💭 موضوع یا موقعیت رو بنویس تا ضرب‌المثل‌های مرتبط رو همراه با معنی و کاربردشون پیدا کنم.\nمثلاً: «برای عجله کردن و پشیمانی چه ضرب‌المثلی داریم؟»"),
+        "story": ("🪄 قصه‌پرداز؛ قصه از خیال تو شروع می‌شه! ✨", "📚 موضوع، شخصیت‌ها یا حال‌وهوای داستان رو بگو.\nمثلاً: «یک داستان کوتاه و شیرین درباره دوستی یک روباه و یک پرنده بنویس؛ پایانش امیدبخش باشه.»\n💡 می‌تونی ژانر، طول و گروه سنی مخاطب رو هم مشخص کنی."),
+        "textcraft": ("✍️ متن‌آرا؛ متن تو، با حال‌وهوای دلخواهت! 💙", "📝 متن رو بفرست و بگو چه تغییری می‌خوای.\nمثلاً: «این پیام رو رسمی‌تر کن»، «صمیمی و دلنشینش کن»، «کوتاهش کن» یا «غلط‌های املاییش رو بگیر».\n🌈 معنی اصلی متن رو بدون اجازه‌ات عوض نمی‌کنم."),
     }
     title, desc = notices[mode]
-    bot.send_message(chat_id, f"{title}\n\n{desc}\n\nبرای تغییر ابزار، ابزار دیگری را انتخاب کن؛ من تا آن زمان همین‌جا می‌مانم. 💙", reply_markup=main_keyboard(user_id))
+    bot.send_message(chat_id, f"{title}\n\n{desc}\n\n💚🤍 هر وقت آماده‌ای، متن یا درخواستت رو بفرست. برای تغییر ابزار، خودت ابزار دیگه‌ای رو انتخاب کن. ⚡", reply_markup=main_keyboard(user_id))
 
 
 def word_request(word):
@@ -686,6 +686,18 @@ def proverb_request(topic):
     return (f"برای موضوع «{topic}» ضرب‌المثل‌های واقعی و معتبر فارسی پیشنهاد کن. "
             "برای هر مورد معنی و کاربرد کوتاه بنویس. عبارت ابداعی را ضرب‌المثل جا نزن؛ "
             "اگر نمونه معتبر کم است، فقط همان تعداد را ارائه کن.")
+
+
+def story_request(prompt):
+    return ("در نقش داستان‌پردازی خلاق و خوش‌ذوق، بر اساس درخواست کاربر داستان بنویس: " + prompt +
+            "\nداستان منسجم، خوش‌خوان و متناسب با مخاطب باشد. اگر جزئیاتی مشخص نشده، خلاقانه اما معقول انتخاب کن. "
+            "از کلیشه و پند مستقیم غیرضروری دوری کن و پایان مناسبی بساز.")
+
+
+def textcraft_request(prompt):
+    return ("در نقش ویراستار و نویسنده فارسی دقیق عمل کن. درخواست کاربر درباره متن را انجام بده: " + prompt +
+            "\nمعنای اصلی، اطلاعات، نام‌ها و منظور نویسنده را حفظ کن مگر کاربر صریحاً تغییر بخواهد. "
+            "اگر فقط اصلاح نگارشی خواسته، محتوا را بازنویسی اساسی نکن. خروجی را مستقیم و آماده استفاده ارائه کن.")
 
 # =====================================================
 # IMAGE TASK: preserve previous prompt and mode
@@ -839,14 +851,8 @@ def callback_handler(call):
         elif action == "settings": show_settings(chat_id)
         elif action == "account": show_account(chat_id, uid)
         elif action == "tools":
-            bot.send_message(chat_id, "🧰 ابزارهای هشیوار\n\nهر دسته رو باز کن تا ابزارهای مربوط به خودش رو ببینی.", reply_markup=tools_keyboard())
-        elif action == "tools_language":
-            bot.send_message(chat_id, "🌐 ابزارهای زبانی\n\nبرای ترجمه، شناخت واژه‌ها و پیدا کردن ضرب‌المثل‌ها آماده‌ام.", reply_markup=language_tools_keyboard())
-        elif action == "tools_creative":
-            bot.send_message(chat_id, "🎨 تصویر و خلاقیت\n\nایده‌ات رو توصیف کن تا به تصویر تبدیلش کنیم.", reply_markup=creative_tools_keyboard())
-        elif action in ("tools_coming_files", "tools_coming_audio", "tools_coming_research"):
-            bot.answer_callback_query(call.id, "این بخش هنوز آماده استفاده نیست؛ به‌محض تکمیل فعالش می‌کنیم.", show_alert=True)
-        elif action in ("image", "translate", "word", "proverb"):
+            bot.send_message(chat_id, "🧰 جعبه‌ابزار هشیوار 💙💚🤍\n\nهر کدوم از این ابزارها برای کاری ساخته شده؛ انتخابش کن تا راهنمای کوتاه و مثال‌هاش رو ببینی. ✨", reply_markup=tools_keyboard())
+        elif action in ("image", "translate", "word", "proverb", "story", "textcraft"):
             select_tool(chat_id, uid, key, action)
         elif action == "invite": show_invite(chat_id, uid)
         elif action == "stats": show_stats(chat_id, uid)
@@ -884,21 +890,19 @@ def handle_text(message):
         bot.send_message(chat_id, "برای انتخاب بخش موردنظرت:", reply_markup=inline_keyboard(uid))
         return
     if text == BTN_TOOLS:
-        bot.send_message(chat_id, "🧰 ابزارهای هشیوار\n\nهر دسته رو باز کن تا ابزارهای مربوط به خودش رو ببینی.", reply_markup=tools_keyboard())
+        bot.send_message(chat_id, "🧰 جعبه‌ابزار هشیوار 💙💚🤍\n\nابزاری رو انتخاب کن تا راهنمای استفاده و نمونه درخواستش رو ببینی. ✨", reply_markup=tools_keyboard())
         return
     if text == BTN_CHAT:
         clear_history(key)
         clear_task(key, uid, chat_id)
         bot.send_message(chat_id, "خب، بریم سراغ یک شروع تازه! این بار از کجا شروع کنیم؟ 🌱", reply_markup=main_keyboard(uid))
         return
-    if text == BTN_IMAGE:
-        select_tool(chat_id, uid, key, "image"); return
-    if text == BTN_TRANSLATE:
-        select_tool(chat_id, uid, key, "translate"); return
-    if text == BTN_WORD:
-        select_tool(chat_id, uid, key, "word"); return
-    if text == BTN_PROVERB:
-        select_tool(chat_id, uid, key, "proverb"); return
+    tool_shortcuts = {
+        BTN_IMAGE: "image", BTN_TRANSLATE: "translate", BTN_WORD: "word",
+        BTN_PROVERB: "proverb", BTN_STORY: "story", BTN_TEXT: "textcraft",
+    }
+    if text in tool_shortcuts:
+        select_tool(chat_id, uid, key, tool_shortcuts[text]); return
     if text == BTN_ACCOUNT:
         show_account(chat_id, uid); return
     if text == BTN_STATS:
@@ -958,10 +962,22 @@ def handle_text(message):
                 answer = ask_ai(word_request(text), key, time.monotonic() + MAX_WAIT, uid)
             output = answer
         elif mode == "proverb":
-            waiting = bot.send_message(chat_id, "🪶 دنبال نمونه‌های درست و مرتبط می‌گردم...")
+            waiting = bot.send_message(chat_id, "📜 دنبال نمونه‌های درست و مرتبط می‌گردم... 💚")
             log_usage(uid, "proverb")
             with lock_for(key), ai_semaphore:
                 answer = ask_ai(proverb_request(text), key, time.monotonic() + MAX_WAIT, uid)
+            output = answer
+        elif mode == "story":
+            waiting = bot.send_message(chat_id, "🪄 دارم نخ قصه‌ات رو پیدا می‌کنم... ✨")
+            log_usage(uid, "story")
+            with lock_for(key), ai_semaphore:
+                answer = ask_ai(story_request(text), key, time.monotonic() + MAX_WAIT, uid)
+            output = answer
+        elif mode == "textcraft":
+            waiting = bot.send_message(chat_id, "✍️ دارم متن رو با سلیقه‌ای که گفتی مرتب می‌کنم... 💙")
+            log_usage(uid, "textcraft")
+            with lock_for(key), ai_semaphore:
+                answer = ask_ai(textcraft_request(text), key, time.monotonic() + MAX_WAIT, uid)
             output = answer
         else:
             waiting = bot.send_message(chat_id, "🧠 بذار یک لحظه روش فکر کنم...")
